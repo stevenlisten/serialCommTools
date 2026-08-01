@@ -17,3 +17,9 @@
 - 验证方式：注入式 E2E（?test=1 替换 navigator.serial）+ 真实链路（VSPE 虚拟口 + Python 模拟设备）
 - 来源任务：T001；日期：2026-08-02
 - 备注：参考 SerialTerminal（MIT）与 googlechromelabs/serial-terminal（Apache-2.0）设计，代码原创
+
+- 深度复查补充经验（2026-08-02）：
+  - HEX/文本双模式必须明确「一种模式一种渲染」：HEX 模式下解码文本只用于报警/过滤，绝不渲染，否则混显
+  - 日志条目带 kind 字段（txt/hex），模式切换重渲染与导出按 kind 决定表示，避免乱码
+  - 大日志重建：只渲染末尾 N 条 + 单次 innerHTML 拼接（2 万条日志重建 < 800ms）
+  - 未完成行更新用 requestAnimationFrame 节流，避免高频数据每 chunk 刷 DOM

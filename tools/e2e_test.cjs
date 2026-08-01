@@ -228,6 +228,115 @@ async function feedBytes(page, arr) {
   check('ARIA viewer role=log', await page.getAttribute('#viewer', 'role') === 'log');
   check('ARIA connect label', (await page.getAttribute('#btn-connect', 'aria-label')) !== null);
 
+  console.log('== T19 hex mode semantics ==');
+  // 确保当前为连接状态（T18 结束时可能已连接，避免误触发断开）
+  if (await page.evaluate(() => window.__test.state().connected)) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.click('#seg-mode button[data-mode="hex"]');
+  await page.waitForTimeout(300);
+  await feed(page, 'Hello\nWorld\n');
+  await page.waitForTimeout(500);
+  check('hex 模式无文本行(txtline=0)', await page.evaluate(() => document.querySelectorAll('#viewer .line.txtline').length) === 0, 'txtline=' + await page.evaluate(() => document.querySelectorAll('#viewer .line.txtline').length));
+  check('hex 行含 48 65 6C', await page.evaluate(() => document.querySelector('#viewer').textContent.includes('48 65 6C')));
+  // hex 模式报警
+  await page.click('.switch'); // 开报警
+  await page.fill('#in-alarm', 'ALERT');
+  await page.waitForTimeout(500);
+  await feed(page, 'ALERT: boom\n');
+  await page.waitForTimeout(400);
+  check('hex 模式报警触发', (await page.title()).includes('报警'));
+  await page.click('.switch'); // 关报警
+  await page.waitForTimeout(4200);
+  // hex 模式 filterOnly + 高亮
+  await page.fill('#in-filter', 'FE');
+  await page.waitForTimeout(600);
+  await page.click('#btn-filteronly');
+  await page.waitForTimeout(300);
+  const hexCount0 = await page.evaluate(() => document.querySelectorAll('#viewer .line.hexline').length);
+  await feedBytes(page, [0xFE,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]);
+  await page.waitForTimeout(500);
+  const hexCount1 = await page.evaluate(() => document.querySelectorAll('#viewer .line.hexline').length);
+  check('含FE行显示(filterOnly)', hexCount1 === hexCount0 + 1, hexCount0 + '->' + hexCount1);
+  check('hex 高亮 mark 出现', await page.locator('#viewer .line mark').count() > 0);
+  await feedBytes(page, [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]);
+  await page.waitForTimeout(500);
+  const hexCount2 = await page.evaluate(() => document.querySelectorAll('#viewer .line.hexline').length);
+  check('不含FE行被过滤', hexCount2 === hexCount1, hexCount1 + '->' + hexCount2);
+  await page.click('#btn-filteronly');
+  await page.fill('#in-filter', '');
+  await page.waitForTimeout(600);
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(400);
+
+  console.log('== T20 port switching ==');
+  // 先断开（T19 结束时处于连接状态）
+  if (await page.evaluate(() => window.__test.state().connected)) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  await page.evaluate(() => window.__test.setPorts(['COM10', 'COM11']));
+  await page.waitForTimeout(800);
+  const optCount = await page.locator('#sel-port option').count();
+  check('下拉出现 2 个端口', optCount === 2, 'count=' + optCount);
+  await page.selectOption('#sel-port', '1');
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => document.querySelector('#st-text').textContent.includes('已连接'), null, { timeout: 5000 });
+  check('连接第二个端口(USB#1234:2)', (await page.textContent('#st-text')).includes('USB#1234:2'), await page.textContent('#st-text'));
+  await page.click('#btn-connect'); // 断开
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  await page.selectOption('#sel-port', '0');
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => document.querySelector('#st-text').textContent.includes('已连接'), null, { timeout: 5000 });
+  check('切回第一个端口(USB#1234:1)', (await page.textContent('#st-text')).includes('USB#1234:1'), await page.textContent('#st-text'));
+
+  console.log('== T21 param hot reload ==');
+  await page.selectOption('#sel-baud', '9600');
+  await page.waitForTimeout(1200);
+  check('参数热更新后仍连接', await page.evaluate(() => window.__test.state().connected));
+  await feed(page, 'after-reload\n');
+  await page.waitForTimeout(300);
+  check('热更新后仍能接收', await page.evaluate(() => window.__test.viewerText().includes('after-reload')));
+
+  console.log('== T22 clear clears paused buffer ==');
+  await page.check('#chk-pause');
+  await feed(page, 'paused-x\npaused-y\n');
+  await page.waitForTimeout(300);
+  check('暂停缓存 2 行', await page.evaluate(() => window.__test.state().pausedBuf.length) === 2);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(200);
+  check('清空后缓存清零', await page.evaluate(() => window.__test.state().pausedBuf.length) === 0);
+  await page.uncheck('#chk-pause');
+  await page.waitForTimeout(300);
+  check('恢复后无残留行', await page.evaluate(() => document.querySelectorAll('#viewer .line').length) === 0);
+
+  console.log('== T23 pending tail line ==');
+  await feed(page, 'PARTIAL-TAIL-NO-NEWLINE');
+  await page.waitForTimeout(500);
+  check('未换行尾部显示为 pending 行', await page.evaluate(() => !!document.querySelector('.line.pending') && document.querySelector('#viewer').textContent.includes('PARTIAL-TAIL-NO-NEWLINE')));
+  await feed(page, '\n');
+  await page.waitForTimeout(400);
+  check('换行后 pending 转为正式行', await page.evaluate(() => !document.querySelector('.line.pending') && document.querySelector('#viewer').textContent.includes('PARTIAL-TAIL-NO-NEWLINE')));
+
+  console.log('== T24 rebuild performance ==');
+  // 构造 20000 行日志并测 rebuild 耗时
+  const perf = await page.evaluate(async () => {
+    const feed = window.__test.feed;
+    const chunk = Array.from({ length: 200 }, (_, i) => 'perf-line-' + i + ' 数据' + i).join('\n') + '\n';
+    for (let i = 0; i < 100; i++) feed(chunk); // 20000 行
+    await new Promise(r => setTimeout(r, 1500)); // 等 rAF 批处理完成
+    const ms = window.__test.rebuildMs(); // 直接测量 rebuildView 耗时
+    return { ms, logLen: window.__test.log().length, domLines: document.querySelectorAll('#viewer .line').length };
+  });
+  check('20000 行日志已生成', perf.logLen >= 20000, 'log=' + perf.logLen);
+  check('rebuild 后 DOM 行数受控(<=6100)', perf.domLines <= 6100, 'dom=' + perf.domLines);
+  check('rebuild 耗时 < 800ms', perf.ms < 800, 'ms=' + perf.ms.toFixed(0));
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' | '));
 
   await page.screenshot({ path: path.join(SHOT_DIR, 'UI-05-final.png') });

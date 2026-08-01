@@ -384,6 +384,7 @@ body.alarm .viewer-wrap{animation:alarmPulse 1s ease-in-out 3}
     <span class="dot" id="st-dot"></span>
     <span id="st-text">未连接</span>
     <span class="st-item">RX <b id="st-rx">0 B</b></span>
+    <span class="st-item">速率 <b id="st-rate">0 B/s</b></span>
     <span class="st-item">TX <b id="st-tx">0 B</b></span>
     <span class="st-item" id="st-params"></span>
     <span class="spacer"></span>
@@ -442,6 +443,7 @@ const Store = {
       caseSensitive: false, filter: '', filterOnly: false,
       alarmOn: false, alarmWords: '',
       sendMode: 'ascii', crlf: 'none', quickSends: ['AT', 'AT+RST', 'Hello', '0102030405'],
+      cmdHist: [],
       lastPortName: ''
     };
   },
@@ -469,17 +471,19 @@ const state = {
   busy: false
 };
 
+let lastRx = 0; // RX 速率统计基准
 const MAX_LOG = 20000;   // 会话日志上限
 const MAX_LINES = 6000;  // DOM 行上限
 const HEX_COL = 16;      // HEX 每行字节数
 
 /* ---------------- 虚拟串口（仅测试模式，用于无硬件自动化自测） ---------------- */
 let fakeSerial = null;
+let FakePortClass = null;
 if (TEST_MODE) {
-  class FakePort {
-    constructor(name) {
+  FakePortClass = class FakePort {
+    constructor(name, idx) {
       this.name = name; this.opened = false; this._ctrl = null; this._tx = [];
-      this._info = { usbVendorId: 0x1234, usbProductId: 0x5678 };
+      this._info = { usbVendorId: 0x1234, usbProductId: idx || 1 };
     }
     async open(opts) {
       this.opened = true; this.opts = opts;
@@ -499,7 +503,7 @@ if (TEST_MODE) {
   }
   fakeSerial = {
     _ports: [],
-    async requestPort() { if (!this._ports.length) this._ports.push(new FakePort('COM10')); return this._ports[0]; },
+    async requestPort() { if (!this._ports.length) this._ports.push(new FakePortClass('COM10', 1)); return this._ports[0]; },
     async getPorts() { return this._ports.slice(); }
   };
   Object.defineProperty(navigator, 'serial', { value: fakeSerial, configurable: true });
@@ -519,10 +523,10 @@ const Serial = {
       if (!ports.length) {
         sel.innerHTML = '<option value="">未授权端口，请点击选择…</option>';
       } else {
-        ports.forEach((p) => {
+        ports.forEach((p, i) => {
           const o = document.createElement('option');
-          o.value = String(ports.indexOf(p));
-          o.textContent = portName(p);
+          o.value = String(i);
+          o.textContent = portName(p, i);
           sel.appendChild(o);
         });
         // 默认选中上次使用的端口
@@ -564,7 +568,8 @@ const Serial = {
       state.connected = true;
       state.busy = false;
       state.lastPort = port;
-      state.lastPortName = portName(port);
+      const _ports = state.grantedPorts || [];
+      state.lastPortName = portName(port, _ports.indexOf(port));
       S.lastPortName = state.lastPortName; Store.save();
       setStatus(true, portName(port));
       updateConnectBtn();
@@ -634,12 +639,12 @@ const Serial = {
     }
   }
 };
-function portName(p) {
+function portName(p, idx) {
   try {
     const i = p.getInfo();
     if (i.usbVendorId) return 'USB#' + i.usbVendorId.toString(16) + ':' + i.usbProductId.toString(16);
   } catch (e) {}
-  return 'COM?';
+  return '串口 #' + (idx === undefined || idx < 0 ? '?' : idx + 1);
 }/* ---------------- 视图渲染 ---------------- */
 const View = {
   el: () => $('#viewer'),
@@ -677,7 +682,9 @@ const View = {
     const v = this.el();
     v.innerHTML = '';
     state.pending = ''; state.pendingBytes = []; state.pendingEl = null; state.log = [];
-    state.rx = 0; state.tx = 0;
+    state.pausedBuf = []; state.pausedBytes = 0;
+    updatePauseBanner();
+    state.rx = 0; state.tx = 0; lastRx = 0;
     updateCounters();
     showEmpty(true);
   },
@@ -703,26 +710,15 @@ function lineHtml(text, cls) {
 /* 收到字节：按行/按 16 字节组进入显示管线 */
 function onBytes(bytes, decoder) {
   showEmpty(false);
-  // HEX 模式：按 16 字节成行
-  if (S.mode === 'hex') {
+  const isHex = S.mode === 'hex';
+  if (isHex) {
     for (const b of bytes) {
       state.pendingBytes.push(b);
       if (state.pendingBytes.length >= HEX_COL) flushHexLine();
     }
+    scheduleHexFlush();
   }
-  // HEX 尾部不足 16 字节也定时冲刷显示
-  if (S.mode === 'hex' && state.pendingBytes.length && !state.hexFlushTimer) {
-    state.hexFlushTimer = setTimeout(() => {
-      state.hexFlushTimer = null;
-      if (state.pendingBytes.length) flushHexLine();
-      if (state.pendingBytes.length) { // 理论不会发生，保险
-        const b = state.pendingBytes.slice(0, HEX_COL);
-        state.pendingBytes = state.pendingBytes.slice(HEX_COL);
-        flushHexLine();
-      }
-    }, 300);
-  }
-  // 文本解码（两种模式都需要：过滤/报警/日志）
+  // 文本解码（两种模式都解码：报警/过滤需要；HEX 模式下显示由字节组负责）
   const text = decoder.decode(bytes, { stream: true });
   if (text) {
     state.pending += text;
@@ -731,9 +727,18 @@ function onBytes(bytes, decoder) {
       let line = state.pending.slice(0, idx);
       state.pending = state.pending.slice(idx + 1);
       if (line.endsWith('\r')) line = line.slice(0, -1);
-      handleLine(line);
+      if (isHex) Alarm.check(line); // HEX 模式：仅做报警检查，不渲染文本行
+      else handleLine(line);
     }
-    updatePendingLine();
+    if (!isHex) updatePendingLine();
+  }
+}
+function scheduleHexFlush() {
+  if (S.mode === 'hex' && state.pendingBytes.length && !state.hexFlushTimer) {
+    state.hexFlushTimer = setTimeout(() => {
+      state.hexFlushTimer = null;
+      if (state.pendingBytes.length) flushHexLine();
+    }, 300);
   }
 }
 
@@ -743,54 +748,70 @@ function flushHexLine() {
   const hex = hexStr(bytes);
   const asc = Array.from(bytes).map((b) => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
   const t = fmtTime();
-  state.log.push({ t, ascii: asc, hex: hex + '  |' + asc + '|' });
+  const hexDisplay = hex + '  |' + asc + '|';
+  state.log.push({ kind: 'hex', t, ascii: asc, hex: hexDisplay });
   if (state.log.length > MAX_LOG) state.log.splice(0, state.log.length - MAX_LOG);
-  pushLineOrPause(t, hex + '  <span class="asc">|' + escapeHtml(asc) + '|</span>', 'hexline', hex + '  |' + asc + '|');
+  // 仅匹配模式过滤（HEX 行同样生效）
+  if (S.filter && S.filterOnly && !entryMatches({ ascii: asc, hex: hexDisplay })) return;
+  const content = highlight(escapeHtml(hex), S.filter, S.caseSensitive)
+    + '  <span class="asc">|' + highlight(escapeHtml(asc), S.filter, S.caseSensitive) + '|</span>';
+  pushLineOrPause(t, content, 'hexline');
 }
 function handleLine(line) {
   const t = fmtTime();
-  const entry = { t, ascii: line, hex: hexStr(new TextEncoder().encode(line)) };
+  const entry = { kind: 'txt', t, ascii: line, hex: hexStr(new TextEncoder().encode(line)) };
   state.log.push(entry);
   if (state.log.length > MAX_LOG) state.log.splice(0, state.log.length - MAX_LOG);
   // 报警检查（收到数据时）
   Alarm.check(line);
   // 过滤
   if (S.filter && S.filterOnly && !lineIncludes(line)) return;
-  pushLineOrPause(t, line, 'txtline', line);
+  pushLineOrPause(t, highlight(escapeHtml(line), S.filter, S.caseSensitive), 'txtline');
 }
 function lineIncludes(text) {
   const kw = S.filter;
   if (!kw) return true;
   return S.caseSensitive ? text.includes(kw) : text.toLowerCase().includes(kw.toLowerCase());
 }
-function pushLineOrPause(t, content, cls, logText) {
+function pushLineOrPause(t, contentHtml, cls) {
   if (state.paused) {
-    state.pausedBuf.push({ t, content, cls, logText });
-    state.pausedBytes += (logText || '').length;
+    state.pausedBuf.push({ t, contentHtml, cls });
+    state.pausedBytes += contentHtml.length;
     updatePauseBanner();
     return;
   }
   let html = '';
   if (S.showTs) html += '<span class="ts">' + t + '</span>';
-  if (cls === 'hexline') html += content; else html += highlight(escapeHtml(content), S.filter, S.caseSensitive);
+  html += contentHtml;
   View.add(html, cls);
 }
 
 /* 未完成行（等 \n）实时更新 */
+let pendingScheduled = false;
 function updatePendingLine() {
   if (S.mode !== 'ascii') return;
   if (state.paused) { updatePauseBanner(); return; }
   if (!state.pending && !state.pendingEl) return;
-  if (!state.pendingEl) {
-    const div = document.createElement('div');
-    div.className = 'line pending';
-    View.el().appendChild(div);
-    state.pendingEl = div;
-  }
-  const html = (S.showTs ? '<span class="ts">' + fmtTime() + '</span>' : '') + highlight(escapeHtml(state.pending), S.filter, S.caseSensitive);
-  state.pendingEl.innerHTML = html || '&nbsp;';
+  if (pendingScheduled) return;
+  pendingScheduled = true;
+  requestAnimationFrame(() => {
+    pendingScheduled = false;
+    if (!state.pending) {
+      if (state.pendingEl) { state.pendingEl.remove(); state.pendingEl = null; }
+      return;
+    }
+    if (!state.pendingEl) {
+      const div = document.createElement('div');
+      div.className = 'line pending';
+      View.el().appendChild(div);
+      state.pendingEl = div;
+    }
+    const html = (S.showTs ? '<span class="ts">' + fmtTime() + '</span>' : '') + highlight(escapeHtml(state.pending), S.filter, S.caseSensitive);
+    state.pendingEl.innerHTML = html || '&nbsp;';
+  });
 }
 function viewFlushPending() {
+  pendingScheduled = false;
   if (state.hexFlushTimer) { clearTimeout(state.hexFlushTimer); state.hexFlushTimer = null; }
   if (state.pending && !state.paused) handleLine(state.pending);
   state.pending = '';
@@ -801,31 +822,33 @@ function viewFlushPending() {
 function entryMatches(e) {
   const kw = S.filter;
   if (!kw) return true;
-  const text = S.mode === 'hex' ? e.hex : e.ascii;
+  const text = (S.mode === 'hex' || e.kind === 'hex') ? e.hex : e.ascii;
   return S.caseSensitive ? text.includes(kw) : text.toLowerCase().includes(kw.toLowerCase());
 }
 function rebuildView() {
   const v = View.el();
   v.innerHTML = '';
   state.pendingEl = null;
+  if (S.mode === 'hex' && state.pendingBytes.length) flushHexLine();
   const log = state.log;
-  if (!log.length) { showEmpty(true); return; }
+  if (!log.length) { showEmpty(false); if (state.pending) updatePendingLine(); return; }
   showEmpty(false);
-  const frag = document.createDocumentFragment();
-  for (const e of log) {
+  // 性能：单次 innerHTML 字符串构建（只渲染末尾 MAX_LINES 条）
+  const start = Math.max(0, log.length - MAX_LINES);
+  const parts = [];
+  for (let i = start; i < log.length; i++) {
+    const e = log[i];
     if (S.filterOnly && !entryMatches(e)) continue;
-    const div = document.createElement('div');
-    div.className = 'line ' + (S.mode === 'hex' ? 'hexline' : 'txtline');
-    let html = '';
+    const isHexEntry = (S.mode === 'hex' || e.kind === 'hex');
+    let html = '<div class="line ' + (isHexEntry ? 'hexline' : 'txtline') + '">';
     if (S.showTs) html += '<span class="ts">' + e.t + '</span>';
-    if (S.mode === 'hex') html += highlight(escapeHtml(e.hex), S.filter, S.caseSensitive);
-    else html += highlight(escapeHtml(e.ascii), S.filter, S.caseSensitive);
-    div.innerHTML = html;
-    frag.appendChild(div);
+    html += highlight(escapeHtml(isHexEntry ? e.hex : e.ascii), S.filter, S.caseSensitive);
+    html += '</div>';
+    parts.push(html);
   }
-  v.appendChild(frag);
-  View.trim();
+  v.innerHTML = parts.join('');
   if (S.autoScroll) v.scrollTop = v.scrollHeight;
+  if (state.pending && S.mode !== 'hex' && !state.paused) updatePendingLine();
 }function viewAddSys(msg, isErr) {
   const html = (S.showTs ? '<span class="ts">' + fmtTime() + '</span>' : '') + '<b>' + escapeHtml(msg) + '</b>';
   View.add(html, isErr ? 'sys err' : 'sys');
@@ -839,7 +862,7 @@ function setPaused(on) {
   updatePauseBanner();
   if (!on) {
     viewFlushPending();
-    for (const it of state.pausedBuf) pushLineOrPause(it.t, it.content, it.cls, it.logText);
+    for (const it of state.pausedBuf) pushLineOrPause(it.t, it.contentHtml, it.cls);
     state.pausedBuf = []; state.pausedBytes = 0;
     updatePauseBanner();
   }
@@ -948,6 +971,7 @@ async function doSend() {
     if (state.cmdHist.length > 50) state.cmdHist.shift();
   }
   state.cmdIdx = -1;
+  Store.save(); // 持久化命令历史
   let bytes;
   try {
     if (S.sendMode === 'hex') {
@@ -1001,7 +1025,7 @@ function exportLog() {
     '# 模式: ' + (S.mode === 'hex' ? 'HEX' : '文本') + '  共 ' + state.log.length + ' 条',
     '#'
   ];
-  const lines = state.log.map((e) => (S.mode === 'hex' ? e.t + '  ' + e.hex : e.t + '  ' + e.ascii));
+  const lines = state.log.map((e) => ((S.mode === 'hex' || e.kind === 'hex') ? e.t + '  ' + e.hex : e.t + '  ' + e.ascii));
   const content = head.concat(lines).join('\r\n') + '\r\n';
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
@@ -1138,13 +1162,12 @@ async function onConnectClick() {
   if (state.busy) return;
   if (state.connected) { await Serial.disconnect(false); return; }
   const opts = Serial.getOpts();
-  let port = state.lastPort;
-  if (!port) {
-    // 尝试从下拉框取已授权端口
-    const sel = $('#sel-port');
-    const ports = state.grantedPorts || [];
-    if (sel.value !== '' && ports.length) port = ports[Number(sel.value)];
-  }
+  let port = null;
+  // 下拉框选中的端口优先（可切换多个已授权端口）
+  const sel = $('#sel-port');
+  const ports = state.grantedPorts || [];
+  if (sel.value !== '' && ports.length) port = ports[Number(sel.value)];
+  if (!port) port = state.lastPort;
   if (!port) {
     toast('请先在系统对话框中选择串口', 'warn');
     port = await Serial.pickPort();
@@ -1175,6 +1198,13 @@ async function init() {
   bindUI();
   tickClock();
   setInterval(tickClock, 1000);
+  state.cmdHist = S.cmdHist || [];
+  // RX 速率统计（每秒）
+  setInterval(() => {
+    const cur = state.rx;
+    $('#st-rate').textContent = fmtBytes(cur - lastRx) + '/s';
+    lastRx = cur;
+  }, 1000);
   if (!navigator.serial) {
     const bar = document.createElement('div');
     bar.className = 'unsupported';
@@ -1196,7 +1226,7 @@ async function init() {
       txAll() { const p = state.port || fakeSerial._ports[0]; return p ? p.txAll() : { bytes: [], total: 0 }; },
       drop() { const p = state.port || fakeSerial._ports[0]; if (p) p.drop(); },
       setPorts(names) {
-        fakeSerial._ports = names.map((n) => new FakePort(n));
+        fakeSerial._ports = names.map((n, i) => new FakePortClass(n, i + 1));
         if (state.grantedPorts) state.grantedPorts = fakeSerial._ports;
         return Serial.refreshPorts();
       },
@@ -1205,6 +1235,7 @@ async function init() {
       settings() { return S; },
       state() { return state; },
       viewerLines() { return $('#viewer').children.length; },
+      rebuildMs() { const t0 = performance.now(); rebuildView(); return performance.now() - t0; },
       viewerText() { return $('#viewer').textContent; },
       log() { return state.log; }
     };
