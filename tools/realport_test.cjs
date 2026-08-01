@@ -99,6 +99,35 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
   check('TX 计数已增加', tx !== '0 B', 'tx=' + tx);
   await page.screenshot({ path: path.join(SHOT_DIR, 'real-02-send.png') });
 
+  // TC-1503 真实 GBK 编码接收（模拟设备每轮发送 GBK 行）
+  await page.selectOption('#sel-enc', 'gbk');
+  await page.waitForTimeout(1200); // 编码热更新重开端口
+  await page.waitForTimeout(6000); // 等下一轮 sim 数据（轮询间隔约 3s）
+  const vGbk = await page.evaluate(() => document.querySelector('#viewer').textContent);
+  check('真实 GBK 行解码显示', vGbk.includes('GBK行'), vGbk.slice(0, 200));
+  await page.selectOption('#sel-enc', 'utf-8');
+  await page.waitForTimeout(1500);
+
+  // TC-1504 真实参数热更新（改波特率重开端口仍连接、RX 继续）
+  const rxBeforeHot = await page.evaluate(() => window.__test ? 0 : 0); // 无 __test，用状态栏无法解析数字；改用是否仍连接 + 收到新数据
+  await page.selectOption('#sel-baud', '9600');
+  await page.waitForTimeout(2000);
+  check('真实热更新后仍连接', (await page.textContent('#st-text')).includes('已连接'));
+  await page.waitForTimeout(4000);
+  const vAfterHot = await page.evaluate(() => document.querySelector('#viewer').textContent);
+  check('真实热更新后继续收到数据', vAfterHot.includes('HELLO-FROM-SIM'));
+  await page.selectOption('#sel-baud', '115200');
+  await page.waitForTimeout(1500);
+
+  // TC-1505 真实接收中断开
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => !document.querySelector('#st-text').textContent.includes('已连接'), null, { timeout: 8000 }).catch(() => {});
+  check('真实接收中断开成功', !(await page.textContent('#st-text')).includes('已连接'));
+  // 断开后重连（恢复状态）
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => document.querySelector('#st-text').textContent.includes('已连接'), null, { timeout: 8000 }).catch(() => {});
+  check('断开后真实重连成功', (await page.textContent('#st-text')).includes('已连接'));
+
   check('全程无 JS 控制台错误', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' | '));
 
   sim.kill();

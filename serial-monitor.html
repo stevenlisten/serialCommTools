@@ -472,6 +472,7 @@ const state = {
 };
 
 let lastRx = 0; // RX 速率统计基准
+const EMPTY_STATE_HTML = '<div class="empty" id="empty-state"><div class="empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2-7 4 14 2-7h8"/></svg></div><h3>等待串口数据</h3><p>点击右上角「连接」选择串口，即可开始实时侦听</p></div>';
 const MAX_LOG = 20000;   // 会话日志上限
 const MAX_LINES = 6000;  // DOM 行上限
 const HEX_COL = 16;      // HEX 每行字节数
@@ -484,13 +485,18 @@ if (TEST_MODE) {
     constructor(name, idx) {
       this.name = name; this.opened = false; this._ctrl = null; this._tx = [];
       this._info = { usbVendorId: 0x1234, usbProductId: idx || 1 };
+      this._failOpen = null; this._failWrite = null;
     }
     async open(opts) {
+      if (this._failOpen) { const e = new Error(this._failOpen); this._failOpen = null; throw e; }
       this.opened = true; this.opts = opts;
       const self = this;
       this.readable = new ReadableStream({ start(c) { self._ctrl = c; } });
       this.writable = new WritableStream({
-        write(chunk) { self._tx.push(new Uint8Array(chunk)); },
+        write(chunk) {
+          if (self._failWrite) { const e = new Error(self._failWrite); self._failWrite = null; throw e; }
+          self._tx.push(new Uint8Array(chunk));
+        },
         close() {}, abort() {}
       });
     }
@@ -503,9 +509,19 @@ if (TEST_MODE) {
   }
   fakeSerial = {
     _ports: [],
-    async requestPort() { if (!this._ports.length) this._ports.push(new FakePortClass('COM10', 1)); return this._ports[0]; },
+    _cancelNext: false,
+    async requestPort() {
+      if (this._cancelNext) { this._cancelNext = false; throw new DOMException('用户取消选择', 'NotFoundError'); }
+      if (!this._ports.length) this._ports.push(new FakePortClass('COM10', 1));
+      return this._ports[0];
+    },
     async getPorts() { return this._ports.slice(); }
   };
+  // 测试模式：端口列表跨刷新保留（sessionStorage），支持端口预选/持久化测试
+  try {
+    const saved = sessionStorage.getItem('__testPorts');
+    if (saved) fakeSerial._ports = saved.split(',').filter(Boolean).map((n, i) => new FakePortClass(n, i + 1));
+  } catch (e) {}
   Object.defineProperty(navigator, 'serial', { value: fakeSerial, configurable: true });
 }
 
@@ -680,7 +696,11 @@ const View = {
   },
   clear() {
     const v = this.el();
-    v.innerHTML = '';
+    // 只移除数据行，保留/重建空状态元素
+    v.querySelectorAll('.line').forEach((n) => n.remove());
+    if (!v.querySelector('#empty-state')) {
+      v.insertAdjacentHTML('afterbegin', EMPTY_STATE_HTML);
+    }
     state.pending = ''; state.pendingBytes = []; state.pendingEl = null; state.log = [];
     state.pausedBuf = []; state.pausedBytes = 0;
     updatePauseBanner();
@@ -721,12 +741,12 @@ function onBytes(bytes, decoder) {
   // 文本解码（两种模式都解码：报警/过滤需要；HEX 模式下显示由字节组负责）
   const text = decoder.decode(bytes, { stream: true });
   if (text) {
-    state.pending += text;
+    // 行尾归一化：\r\n 与孤立 \r 均视为换行（标准串口终端行为；HEX 模式保留原始字节显示）
+    state.pending += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     let idx;
     while ((idx = state.pending.indexOf('\n')) >= 0) {
-      let line = state.pending.slice(0, idx);
+      const line = state.pending.slice(0, idx);
       state.pending = state.pending.slice(idx + 1);
-      if (line.endsWith('\r')) line = line.slice(0, -1);
       if (isHex) Alarm.check(line); // HEX 模式：仅做报警检查，不渲染文本行
       else handleLine(line);
     }
@@ -1160,20 +1180,28 @@ function bindUI() {
 }
 async function onConnectClick() {
   if (state.busy) return;
-  if (state.connected) { await Serial.disconnect(false); return; }
-  const opts = Serial.getOpts();
-  let port = null;
-  // 下拉框选中的端口优先（可切换多个已授权端口）
-  const sel = $('#sel-port');
-  const ports = state.grantedPorts || [];
-  if (sel.value !== '' && ports.length) port = ports[Number(sel.value)];
-  if (!port) port = state.lastPort;
-  if (!port) {
-    toast('请先在系统对话框中选择串口', 'warn');
-    port = await Serial.pickPort();
-    if (!port) return;
+  // 入口即置忙：防止快速双击建立双连接/双读循环（竞态）
+  state.busy = true;
+  updateConnectBtn();
+  try {
+    if (state.connected) { await Serial.disconnect(false); return; }
+    const opts = Serial.getOpts();
+    let port = null;
+    // 下拉框选中的端口优先（可切换多个已授权端口）
+    const sel = $('#sel-port');
+    const ports = state.grantedPorts || [];
+    if (sel.value !== '' && ports.length) port = ports[Number(sel.value)];
+    if (!port) port = state.lastPort;
+    if (!port) {
+      toast('请先在系统对话框中选择串口', 'warn');
+      port = await Serial.pickPort();
+      if (!port) return;
+    }
+    await Serial.connect(port, opts);
+  } finally {
+    state.busy = false;
+    updateConnectBtn();
   }
-  await Serial.connect(port, opts);
 }
 function maybeApplyParams(label) {
   if (state.connected && state.lastPort) {
@@ -1225,8 +1253,14 @@ async function init() {
       txBytes() { const p = state.port || fakeSerial._ports[0]; return p ? p.txAll().total : 0; },
       txAll() { const p = state.port || fakeSerial._ports[0]; return p ? p.txAll() : { bytes: [], total: 0 }; },
       drop() { const p = state.port || fakeSerial._ports[0]; if (p) p.drop(); },
+      cancelNextPick() { fakeSerial._cancelNext = true; },
+      clearLastPort() { state.lastPort = null; state.lastPortName = ''; },
+      clearHist() { state.cmdHist.length = 0; S.cmdHist = state.cmdHist; },
+      failNextOpen(msg) { const p = state.port || fakeSerial._ports[0]; if (p) p._failOpen = msg || '模拟打开失败'; },
+      failNextWrite(msg) { const p = state.port || fakeSerial._ports[0]; if (p) p._failWrite = msg || '模拟写入失败'; },
       setPorts(names) {
         fakeSerial._ports = names.map((n, i) => new FakePortClass(n, i + 1));
+        try { sessionStorage.setItem('__testPorts', names.join(',')); } catch (e) {}
         if (state.grantedPorts) state.grantedPorts = fakeSerial._ports;
         return Serial.refreshPorts();
       },

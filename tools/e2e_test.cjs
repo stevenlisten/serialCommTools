@@ -337,6 +337,677 @@ async function feedBytes(page, arr) {
   await page.click('#btn-clear');
   await page.waitForTimeout(300);
 
+  console.log('== T25 connection state machine & races ==');
+  // 确保断开
+  if (await page.evaluate(() => window.__test.state().connected)) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  // TC-101/102 无端口 + 取消选择
+  await page.evaluate(() => { window.__test.setPorts([]); window.__test.clearLastPort(); window.__test.cancelNextPick(); });
+  await page.click('#btn-connect');
+  await page.waitForTimeout(800);
+  check('无端口取消选择后未连接', !(await page.evaluate(() => window.__test.state().connected)));
+  check('无端口提示 toast', await page.locator('.toast.warn').count() > 0);
+  // TC-103 双击竞态：只建立一次连接
+  await page.evaluate(() => { window.__test.setPorts(['COM10']); });
+  await page.evaluate(() => { const b = document.getElementById('btn-connect'); b.click(); b.click(); });
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.waitForTimeout(400);
+  const connLines = await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line')).filter(l => l.textContent.includes('已连接')).length);
+  check('双击只建立一次连接', connLines === 1, 'connLines=' + connLines);
+  // TC-104 busy 禁用 + TC-108 双击断开
+  const busyDisabled = await page.evaluate(() => {
+    const b = document.getElementById('btn-connect');
+    b.click();
+    return b.disabled;
+  });
+  check('点击后立即 busy 禁用', busyDisabled === true);
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  await page.waitForTimeout(300);
+  check('双击断开后未连接', !(await page.evaluate(() => window.__test.state().connected)));
+  check('断开后按钮显示重连', (await page.textContent('#btn-connect')).trim() === '重连');
+
+  console.log('== T26 connect/disconnect cycles ==');
+  for (let i = 0; i < 10; i++) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  check('10 次连接/断开循环稳定', !(await page.evaluate(() => window.__test.state().connected)));
+  // TC-107 drop 后立即重连
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.evaluate(() => window.__test.drop());
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  check('drop 后立即重连成功', await page.evaluate(() => window.__test.state().connected));
+
+  console.log('== T27 params ==');
+  // 断开状态修改参数仅保存
+  if (await page.evaluate(() => window.__test.state().connected)) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  await page.selectOption('#sel-data', '7');
+  check('未连接改参数已保存', await page.evaluate(() => window.__test.settings().dataBits) === '7');
+  await page.selectOption('#sel-data', '8');
+  // 自定义波特率合法
+  await page.evaluate(() => { window.prompt = () => '250000'; });
+  await page.selectOption('#sel-baud', 'custom');
+  await page.waitForTimeout(500);
+  check('自定义波特率 250000 生效', await page.evaluate(() => window.__test.settings().baud) === 250000);
+  // 非法值
+  await page.evaluate(() => { window.prompt = () => 'abc'; });
+  await page.selectOption('#sel-baud', 'custom');
+  await page.waitForTimeout(500);
+  check('非法波特率被拒绝', await page.evaluate(() => window.__test.settings().baud) === 250000);
+  await page.evaluate(() => { window.prompt = () => null; });
+  await page.selectOption('#sel-baud', 'custom');
+  await page.waitForTimeout(500);
+  check('取消自定义波特率保持原值', await page.evaluate(() => window.__test.settings().baud) === 250000);
+  await page.selectOption('#sel-baud', '115200');
+  // 连接 + 热更新 + 持续收数
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  for (let i = 0; i < 5; i++) {
+    await page.selectOption('#sel-baud', i % 2 ? '9600' : '115200');
+    await page.waitForTimeout(600);
+    await feed(page, 'hot-reload-' + i + '\n');
+  }
+  await page.waitForTimeout(400);
+  check('热更新 5 次后仍连接', await page.evaluate(() => window.__test.state().connected));
+  check('热更新期间 RX 累计', await page.evaluate(() => window.__test.state().rx) > 0);
+  // 编码热更新
+  await page.selectOption('#sel-enc', 'gbk');
+  await page.waitForTimeout(700);
+  await feedBytes(page, [0xD6, 0xD0, 0xCE, 0xC4, 0x0A]);
+  await page.waitForTimeout(400);
+  check('编码热更新后 GBK 解码', await page.evaluate(() => window.__test.viewerText().includes('中文')));
+  await page.selectOption('#sel-enc', 'utf-8');
+
+  console.log('== T28 receive/display ==');
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feed(page, 'a\r\nb\rc\n');
+  await page.waitForTimeout(400);
+  const c1 = await page.evaluate(() => document.querySelectorAll('#viewer .line.txtline').length);
+  check('混合换行分帧 3 行', c1 === 3, 'count=' + c1);
+  await feed(page, '\n\n');
+  await page.waitForTimeout(400);
+  const c2 = await page.evaluate(() => document.querySelectorAll('#viewer .line.txtline').length);
+  check('空行 +2', c2 === c1 + 2, 'count=' + c2);
+  await feed(page, 'L'.repeat(200 * 1024) + '\n');
+  await page.waitForTimeout(600);
+  check('200KB 行接收', await page.evaluate(() => window.__test.state().rx) > 200 * 1024);
+  // HEX 全字节
+  await page.click('#seg-mode button[data-mode="hex"]');
+  await page.waitForTimeout(300);
+  await feedBytes(page, Array.from({ length: 256 }, (_, i) => i));
+  await page.waitForTimeout(700);
+  let vh = await page.evaluate(() => document.querySelector('#viewer').textContent);
+  check('HEX 全字节首行', vh.includes('00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F'));
+  check('HEX 全字节末行', vh.includes('F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 FA FB FC FD FE FF'));
+  // HEX 尾部多次累积
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [1, 2, 3]);
+  await page.waitForTimeout(600);
+  await feedBytes(page, [4, 5, 6, 7, 8]);
+  await page.waitForTimeout(600);
+  await feedBytes(page, [9, 10, 11, 12, 13, 14, 15, 16]);
+  await page.waitForTimeout(600);
+  const hc = await page.evaluate(() => document.querySelectorAll('#viewer .line.hexline').length);
+  check('HEX 尾部分次累积 3 行', hc === 3, 'count=' + hc);
+  // 时间戳对 hex 行
+  await page.uncheck('#chk-ts');
+  await feedBytes(page, Array.from({ length: 16 }, (_, i) => i));
+  await page.waitForTimeout(500);
+  const lastTs = await page.evaluate(() => { const els = document.querySelectorAll('#viewer .line.hexline'); const last = els[els.length - 1]; return last ? last.querySelector('.ts') : null; });
+  check('ts 关闭后新 hex 行无时间戳', lastTs === null);
+  await page.check('#chk-ts');
+  // 自动滚动
+  await page.uncheck('#chk-scroll');
+  await page.waitForTimeout(200);
+  for (let i = 0; i < 50; i++) await feed(page, 'scroll-line-' + i + '\n');
+  await page.waitForTimeout(800);
+  const st1 = await page.evaluate(() => document.querySelector('#viewer').scrollTop);
+  const max1 = await page.evaluate(() => document.querySelector('#viewer').scrollHeight - document.querySelector('#viewer').clientHeight);
+  check('自动滚动关闭不跳底', st1 < max1 - 10 || max1 <= 0, 'st=' + st1 + ' max=' + max1);
+  await page.check('#chk-scroll');
+  await feed(page, 'bottom\n');
+  await page.waitForTimeout(500);
+  const st2 = await page.evaluate(() => document.querySelector('#viewer').scrollTop);
+  const max2 = await page.evaluate(() => document.querySelector('#viewer').scrollHeight - document.querySelector('#viewer').clientHeight);
+  check('自动滚动开启跳底', Math.abs(st2 - max2) <= 2, 'st=' + st2 + ' max=' + max2);
+  // 暂停 HEX
+  await page.check('#chk-pause');
+  await feedBytes(page, Array.from({ length: 20 }, (_, i) => i));
+  await page.waitForTimeout(600);
+  const pb = await page.evaluate(() => window.__test.state().pausedBuf.length);
+  check('暂停中 HEX 缓存', pb > 0, 'buf=' + pb);
+  await page.uncheck('#chk-pause');
+  await page.waitForTimeout(400);
+  // 清空空状态
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  check('清空后空状态显示', await page.evaluate(() => { const e = document.getElementById('empty-state'); return e && e.style.display !== 'none'; }));
+
+  console.log('== T29 caps ==');
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(300);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  const capChunk = Array.from({ length: 300 }, (_, i) => 'cap-' + i).join('\n') + '\n';
+  for (let i = 0; i < 100; i++) await feed(page, capChunk);
+  await page.waitForTimeout(2500);
+  const capLog = await page.evaluate(() => window.__test.log().length);
+  check('日志上限 20000', capLog === 20000, 'log=' + capLog);
+  const capDom = await page.evaluate(() => document.querySelectorAll('#viewer .line').length);
+  check('DOM 上限 <=6100', capDom <= 6100, 'dom=' + capDom);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feed(page, 'M'.repeat(1048576) + '\n');
+  await page.waitForTimeout(1800);
+  check('1MB 单行无崩溃', await page.evaluate(() => window.__test.state().rx) >= 1048576);
+
+  console.log('== T30 encodings ==');
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await page.selectOption('#sel-enc', 'utf-8');
+  await feedBytes(page, [0xE4]); await page.waitForTimeout(60);
+  await feedBytes(page, [0xB8, 0xAD]); await page.waitForTimeout(60);
+  await feedBytes(page, [0xE6, 0x96, 0x87, 0x0A]); await page.waitForTimeout(400);
+  check('UTF-8 跨 chunk 解码', await page.evaluate(() => window.__test.viewerText().includes('中文')));
+  await page.selectOption('#sel-enc', 'gbk');
+  await page.waitForTimeout(700);
+  await feedBytes(page, [0xD6, 0xD0, 0xCE, 0xC4, 0x0A]);
+  await page.waitForTimeout(400);
+  check('GBK 解码', await page.evaluate(() => window.__test.viewerText().includes('中文')));
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0xD6]); await page.waitForTimeout(80);
+  await feedBytes(page, [0xD0, 0xCE]); await page.waitForTimeout(80);
+  await feedBytes(page, [0xC4, 0x0A]); await page.waitForTimeout(400);
+  check('GBK 跨 chunk 解码', await page.evaluate(() => window.__test.viewerText().includes('中文')));
+  await page.selectOption('#sel-enc', 'latin1');
+  await page.waitForTimeout(700);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0xE4, 0x0A]);
+  await page.waitForTimeout(400);
+  check('Latin-1 高字节显示', await page.evaluate(() => window.__test.viewerText().includes('ä')));
+  await page.selectOption('#sel-enc', 'utf-8');
+  await page.waitForTimeout(700);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0xFF, 0xFE, 0x0A]);
+  await page.waitForTimeout(400);
+  check('非法 UTF-8 不崩溃', await page.evaluate(() => document.querySelectorAll('#viewer .line').length) > 0);
+
+  console.log('== T31 filter ==');
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  const regexLine = 'a.b*c+d?e(f)g[h]i{j}k\\l|m^n$';
+  await feed(page, regexLine + '\nplain-line\n');
+  await page.waitForTimeout(400);
+  await page.fill('#in-filter', regexLine);
+  await page.waitForTimeout(800);
+  check('正则特殊字符过滤词高亮', await page.locator('#viewer .line mark').count() > 0);
+  await page.click('#btn-filteronly');
+  await page.waitForTimeout(300);
+  const fl = await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line')).map(l => l.textContent));
+  check('正则词仅匹配', fl.every(t => t.includes('a.b*c+d')));
+  await page.click('#btn-filteronly');
+  await page.waitForTimeout(300);
+  // HTML 字符过滤词
+  await page.fill('#in-filter', '<tag>');
+  await page.waitForTimeout(800);
+  await feed(page, "AT&T <tag> \"q\" 's'\n");
+  await page.waitForTimeout(400);
+  check('HTML 字符过滤词高亮', await page.locator('#viewer .line mark').count() > 0);
+  check('无注入元素(img/script)', await page.evaluate(() => document.querySelectorAll('#viewer img, #viewer script').length) === 0);
+  // 中文过滤词
+  await page.fill('#in-filter', '传感器');
+  await page.waitForTimeout(800);
+  await feed(page, '温度传感器 25C\n');
+  await page.waitForTimeout(400);
+  check('中文过滤词高亮', await page.locator('#viewer .line mark').count() > 0);
+  // 清除
+  await page.fill('#in-filter', '');
+  await page.waitForTimeout(800);
+  check('清除过滤后无 mark', await page.locator('#viewer .line mark').count() === 0);
+  // 大小写
+  await feed(page, 'AbC-DEF\n');
+  await page.waitForTimeout(300);
+  await page.fill('#in-filter', 'abc');
+  await page.waitForTimeout(800);
+  check('默认忽略大小写命中', await page.locator('#viewer .line mark').count() > 0);
+  await page.click('#btn-case');
+  await page.waitForTimeout(500);
+  check('大小写敏感后不命中', await page.locator('#viewer .line mark').count() === 0);
+  await page.click('#btn-case');
+  await page.waitForTimeout(300);
+  // 超长过滤词
+  await page.fill('#in-filter', 'x'.repeat(10240));
+  await page.waitForTimeout(1000);
+  check('10KB 过滤词不崩溃', await page.evaluate(() => document.querySelectorAll('#viewer .line').length > 0));
+  await page.fill('#in-filter', '');
+  await page.waitForTimeout(800);
+
+  console.log('== T32 alarm ==');
+  await page.fill('#in-alarm', 'err,警告');
+  await page.waitForTimeout(500);
+  if (!(await page.evaluate(() => window.__test.settings().alarmOn))) { await page.click('.switch'); }
+  await page.waitForTimeout(300);
+  await feed(page, 'xxx err xxx\n');
+  await page.waitForTimeout(400);
+  check('多关键字任一命中', (await page.title()).includes('报警'));
+  await page.waitForTimeout(4500);
+  await page.fill('#in-alarm', '');
+  await page.waitForTimeout(500);
+  await feed(page, 'anything\n');
+  await page.waitForTimeout(400);
+  check('空关键字不触发', !(await page.title()).includes('报警'));
+  await page.fill('#in-alarm', 'ALERT');
+  await page.waitForTimeout(500);
+  for (let i = 0; i < 5; i++) await feed(page, 'ALERT-' + i + '\n');
+  await page.waitForTimeout(600);
+  check('连续触发标题变化', (await page.title()).includes('报警'));
+  await page.waitForTimeout(4500); // 等标题恢复
+  check('标题已恢复', !(await page.title()).includes('报警'));
+  await page.click('.switch');
+  await page.waitForTimeout(300);
+  await feed(page, 'ALERT-off\n');
+  await page.waitForTimeout(400);
+  check('关闭开关后不触发', !(await page.title()).includes('报警'));
+  await page.waitForTimeout(4200);
+  await page.click('.switch');
+  await page.waitForTimeout(300);
+  await page.fill('#in-alarm', 'a.b');
+  await page.waitForTimeout(500);
+  await feed(page, 'xa.bx\n');
+  await page.waitForTimeout(400);
+  check('报警词按文本匹配触发', (await page.title()).includes('报警'));
+  await page.waitForTimeout(4200);
+  await page.selectOption('#sel-enc', 'gbk');
+  await page.waitForTimeout(700);
+  await page.fill('#in-alarm', '错误');
+  await page.waitForTimeout(500);
+  await feedBytes(page, [0xB4, 0xED, 0xCE, 0xF3, 0x0A]);
+  await page.waitForTimeout(400);
+  check('GBK 中文报警词触发', (await page.title()).includes('报警'));
+  await page.waitForTimeout(4200);
+  await page.selectOption('#sel-enc', 'utf-8');
+  await page.waitForTimeout(700);
+  await page.fill('#in-alarm', '');
+  await page.click('.switch');
+  await page.waitForTimeout(300);
+
+  console.log('== T33 send ==');
+  if (!(await page.evaluate(() => window.__test.state().connected))) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  }
+  const t0 = await page.evaluate(() => window.__test.txBytes());
+  await page.fill('#in-send', '');
+  await page.click('#btn-send');
+  await page.waitForTimeout(300);
+  check('空输入不发送', await page.evaluate(() => window.__test.txBytes()) === t0);
+  await page.selectOption('#sel-sendmode', 'hex');
+  await page.fill('#in-send', 'ABC');
+  await page.click('#btn-send');
+  await page.waitForTimeout(300);
+  check('奇数 HEX 拒绝', await page.evaluate(() => window.__test.txBytes()) === t0);
+  check('奇数 HEX toast', await page.locator('.toast.err').count() > 0);
+  await page.fill('#in-send', 'GG 11');
+  await page.click('#btn-send');
+  await page.waitForTimeout(300);
+  check('垃圾 HEX 拒绝', await page.evaluate(() => window.__test.txBytes()) === t0);
+  await page.fill('#in-send', '48,65 6C\t6C');
+  await page.click('#btn-send');
+  await page.waitForTimeout(300);
+  const tx1 = await page.evaluate(() => window.__test.txBytes());
+  check('HEX 变体发送 4 字节', tx1 === t0 + 4, 'tx=' + tx1);
+  await page.selectOption('#sel-sendmode', 'ascii');
+  await page.selectOption('#sel-crlf', 'none');
+  await page.fill('#in-send', 'S'.repeat(100 * 1024));
+  await page.click('#btn-send');
+  await page.waitForTimeout(600);
+  check('100KB 发送计数', await page.evaluate(() => window.__test.txBytes()) === tx1 + 102400);
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  const t2 = await page.evaluate(() => window.__test.txBytes());
+  await page.fill('#in-send', 'X');
+  await page.click('#btn-send');
+  await page.waitForTimeout(300);
+  check('未连接发送提示', await page.locator('.toast.warn').count() > 0);
+  check('未连接不发送', await page.evaluate(() => window.__test.txBytes()) === t2);
+  // 快捷上限
+  await page.evaluate(() => { const s = window.__test.settings(); s.quickSends = []; localStorage.setItem('serialListener.v1', JSON.stringify(s)); });
+  for (let i = 0; i < 12; i++) {
+    await page.fill('#in-send', 'Q' + i);
+    await page.click('#btn-quickadd');
+    await page.waitForTimeout(150);
+  }
+  check('快捷 12 条上限', await page.locator('.chip').count() === 12, 'chips=' + await page.locator('.chip').count());
+  await page.fill('#in-send', 'Q13');
+  await page.click('#btn-quickadd');
+  await page.waitForTimeout(300);
+  check('第 13 条被拒', await page.locator('.chip').count() === 12);
+  await page.fill('#in-send', 'Q0');
+  await page.click('#btn-quickadd');
+  await page.waitForTimeout(300);
+  check('重复项拒绝', await page.locator('.chip').count() === 12);
+  await page.locator('.chip', { hasText: 'Q5' }).locator('.x').click();
+  await page.waitForTimeout(300);
+  check('删除后 11 条', await page.locator('.chip').count() === 11);
+
+  console.log('== T34 history & CRLF ==');
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.evaluate(() => window.__test.clearHist());
+  await page.fill('#in-send', 'DUP');
+  await page.click('#btn-send');
+  await page.waitForTimeout(250);
+  await page.fill('#in-send', 'DUP');
+  await page.click('#btn-send');
+  await page.waitForTimeout(250);
+  check('相邻重复去重', await page.evaluate(() => window.__test.settings().cmdHist.length) === 1);
+  for (let i = 0; i < 60; i++) {
+    await page.fill('#in-send', 'h' + i);
+    await page.click('#btn-send');
+    await page.waitForTimeout(80);
+  }
+  check('历史 50 条上限', await page.evaluate(() => window.__test.settings().cmdHist.length) === 50);
+  await page.reload();
+  await waitTest(page);
+  await page.focus('#in-send');
+  await page.keyboard.press('ArrowUp');
+  check('刷新后历史保留(最新50条末条h59)', await page.inputValue('#in-send') === 'h59', 'v=' + await page.inputValue('#in-send'));
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.selectOption('#sel-crlf', 'none');
+  let tb = await page.evaluate(() => window.__test.txBytes());
+  await page.fill('#in-send', 'Z');
+  await page.click('#btn-send');
+  await page.waitForTimeout(250);
+  check('CRLF=none 1 字节', await page.evaluate(() => window.__test.txBytes()) - tb === 1);
+  await page.selectOption('#sel-crlf', 'CR');
+  tb = await page.evaluate(() => window.__test.txBytes());
+  await page.fill('#in-send', 'Z');
+  await page.click('#btn-send');
+  await page.waitForTimeout(250);
+  check('CR 2 字节', await page.evaluate(() => window.__test.txBytes()) - tb === 2);
+  await page.selectOption('#sel-crlf', 'LF');
+  tb = await page.evaluate(() => window.__test.txBytes());
+  await page.fill('#in-send', 'Z');
+  await page.click('#btn-send');
+  await page.waitForTimeout(250);
+  check('LF 2 字节', await page.evaluate(() => window.__test.txBytes()) - tb === 2);
+  await page.selectOption('#sel-crlf', 'CRLF');
+  tb = await page.evaluate(() => window.__test.txBytes());
+  await page.fill('#in-send', 'Z');
+  await page.click('#btn-send');
+  await page.waitForTimeout(250);
+  check('CRLF 3 字节', await page.evaluate(() => window.__test.txBytes()) - tb === 3);
+  await page.selectOption('#sel-crlf', 'none');
+
+  console.log('== T35 export ==');
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await page.click('#btn-export');
+  await page.waitForTimeout(400);
+  check('空日志导出提示', await page.locator('.toast.warn').count() > 0);
+  await feed(page, 'EXPORT-A\n');
+  await page.waitForTimeout(300);
+  const [dl1] = await Promise.all([page.waitForEvent('download', { timeout: 8000 }), page.click('#btn-export')]);
+  check('文件名格式', /^serial_log_\d{8}_\d{6}\.log$/.test(dl1.suggestedFilename()), dl1.suggestedFilename());
+  await page.click('#seg-mode button[data-mode="hex"]');
+  await page.waitForTimeout(300);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0x48, 0x65]);
+  await page.waitForTimeout(600);
+  const [dl2] = await Promise.all([page.waitForEvent('download', { timeout: 8000 }), page.click('#btn-export')]);
+  const p2 = path.join(SHOT_DIR, 'export-hex.log');
+  await dl2.saveAs(p2);
+  check('HEX 模式导出含 hex', fs.readFileSync(p2, 'utf8').includes('48 65'));
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(300);
+  await feed(page, 'TXTLINE-X\n');
+  await page.waitForTimeout(300);
+  const [dl3] = await Promise.all([page.waitForEvent('download', { timeout: 8000 }), page.click('#btn-export')]);
+  const p3 = path.join(SHOT_DIR, 'export-mix.log');
+  await dl3.saveAs(p3);
+  const c3 = fs.readFileSync(p3, 'utf8');
+  check('混合导出含文本行', c3.includes('TXTLINE-X'));
+  check('混合导出 hex 条目保留', c3.includes('48 65'));
+  check('导出含头部', c3.includes('# Serial Listener 日志') && c3.includes('# 端口'));
+  await feed(page, 'AFTER-EXPORT\n');
+  await page.waitForTimeout(300);
+  check('导出后继续接收', await page.evaluate(() => window.__test.viewerText().includes('AFTER-EXPORT')));
+
+  console.log('== T36 persistence ==');
+  if (await page.evaluate(() => window.__test.state().connected)) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  await page.evaluate(() => window.__test.setPorts(['COM10', 'COM11']));
+  await page.waitForTimeout(600);
+  await page.selectOption('#sel-port', '1');
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => document.querySelector('#st-text').textContent.includes('USB#1234:2'), null, { timeout: 5000 });
+  await page.reload();
+  await waitTest(page);
+  await page.waitForTimeout(700);
+  check('刷新后端口预选 COM11', await page.inputValue('#sel-port') === '1', 'sel=' + await page.inputValue('#sel-port'));
+  await page.evaluate(() => localStorage.setItem('serialListener.v1', '{bad json'));
+  await page.reload();
+  await waitTest(page);
+  await page.waitForTimeout(500);
+  check('损坏 localStorage 后默认配置', await page.evaluate(() => window.__test.settings().baud) === 115200);
+  check('损坏后页面正常', await page.locator('#btn-connect').isVisible());
+
+  console.log('== T37 security/static ==');
+  if (!(await page.evaluate(() => window.__test.state().connected))) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  }
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feed(page, '<script>window.__xss=1</script>\n<img src=x onerror="window.__xss=2">\n');
+  await page.waitForTimeout(500);
+  check('数据 XSS 不执行', await page.evaluate(() => window.__xss === undefined));
+  check('XSS 显示为文本', await page.evaluate(() => document.querySelector('#viewer').textContent.includes('<script>')));
+  await page.fill('#in-filter', '<img src=x onerror="window.__xss=3">');
+  await page.waitForTimeout(800);
+  check('过滤词注入不执行', await page.evaluate(() => window.__xss === undefined));
+  check('无 img 元素', await page.evaluate(() => document.querySelectorAll('#viewer img').length) === 0);
+  await page.fill('#in-filter', '');
+  await page.waitForTimeout(700);
+  const dupIds = await page.evaluate(() => {
+    const seen = {}, dups = [];
+    document.querySelectorAll('[id]').forEach(el => { if (seen[el.id]) dups.push(el.id); seen[el.id] = 1; });
+    return dups;
+  });
+  check('DOM 无重复 ID', dupIds.length === 0, dupIds.join(','));
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  check('空状态文案', await page.evaluate(() => document.querySelector('#empty-state') && document.querySelector('#empty-state').textContent.includes('等待串口数据')));
+  const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page2 = await ctx2.newPage();
+  await page2.addInitScript(() => { Object.defineProperty(Navigator.prototype, 'serial', { get: () => undefined, configurable: true }); });
+  await page2.goto('file:///C:/01_Dev/Ai/chatgpt/serialCommTools/serial-monitor.html');
+  await page2.waitForTimeout(800);
+  check('缺 serial 显示不支持横幅', await page2.locator('.unsupported').isVisible());
+  await ctx2.close();
+
+  console.log('== T38 error paths ==');
+  if (await page.evaluate(() => window.__test.state().connected)) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  await page.evaluate(() => { window.__test.setPorts(['COM10']); window.__test.failNextOpen('模拟打开失败'); });
+  await page.click('#btn-connect');
+  await page.waitForTimeout(800);
+  check('open 失败未连接', !(await page.evaluate(() => window.__test.state().connected)));
+  check('open 失败 toast', await page.locator('.toast.err').count() > 0);
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  check('open 失败后可重试', await page.evaluate(() => window.__test.state().connected));
+  await page.evaluate(() => window.__test.failNextWrite('模拟写入失败'));
+  await page.fill('#in-send', 'X');
+  await page.click('#btn-send');
+  await page.waitForTimeout(700);
+  check('写失败后断开', !(await page.evaluate(() => window.__test.state().connected)));
+  check('写失败 toast', await page.locator('.toast.err').count() > 0);
+  await page.evaluate(() => { window.__origSetItem = Storage.prototype.setItem; Storage.prototype.setItem = function () { throw new Error('quota'); }; });
+  await page.fill('#in-filter', 'x');
+  await page.waitForTimeout(800);
+  check('Storage 异常不崩溃', await page.locator('#btn-connect').isVisible());
+  await page.evaluate(() => { Storage.prototype.setItem = window.__origSetItem; });
+  await page.reload();
+  await waitTest(page);
+  await page.waitForTimeout(400);
+
+  console.log('== T39 coupling ==');
+  await page.evaluate(() => window.__test.setPorts(['COM10']));
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.check('#chk-pause');
+  await page.fill('#in-filter', 'COUP');
+  await page.waitForTimeout(600);
+  await page.click('#seg-mode button[data-mode="hex"]');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0x43, 0x4F, 0x55, 0x50, 0x0A]);
+  await page.waitForTimeout(500);
+  await page.uncheck('#chk-pause');
+  await page.waitForTimeout(400);
+  check('暂停+过滤+hex 组合稳定', await page.evaluate(() => window.__test.state().pausedBuf.length) === 0);
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(300);
+  await page.fill('#in-filter', 'HOT');
+  await page.click('#btn-filteronly');
+  await page.waitForTimeout(300);
+  await feed(page, 'HOT-A\nCOLD-B\n');
+  await page.waitForTimeout(400);
+  let vis = await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line')).map(l => l.textContent));
+  check('过滤下仅 HOT 可见', vis.every(t => t.includes('HOT')));
+  await page.selectOption('#sel-baud', '9600');
+  await page.waitForTimeout(800);
+  await feed(page, 'HOT-C\n');
+  await page.waitForTimeout(400);
+  vis = await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line.txtline, #viewer .line.hexline')).map(l => l.textContent));
+  check('热更新后过滤仍生效(数据行)', vis.every(t => t.includes('HOT')));
+  await page.click('#btn-filteronly');
+  await page.fill('#in-filter', '');
+  await page.waitForTimeout(600);
+  for (let i = 0; i < 20; i++) {
+    await page.click('#seg-mode button[data-mode="' + (i % 2 ? 'ascii' : 'hex') + '"]');
+    await feed(page, 'fast-' + i + '\n');
+    await page.waitForTimeout(50);
+  }
+  await page.waitForTimeout(600);
+  check('模式快速切换 20 次稳定', await page.evaluate(() => document.querySelectorAll('#viewer .line').length) > 0);
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(300);
+  const rx0 = await page.evaluate(() => window.__test.state().rx);
+  const tx0 = await page.evaluate(() => window.__test.txBytes());
+  for (let i = 0; i < 100; i++) {
+    await feed(page, 'R' + i + '\n');
+    await page.fill('#in-send', 'S' + i);
+    await page.click('#btn-send');
+  }
+  await page.waitForTimeout(900);
+  check('收发 100 轮 RX 增长', await page.evaluate(() => window.__test.state().rx) > rx0);
+  check('收发 100 轮 TX 增长', await page.evaluate(() => window.__test.txBytes()) > tx0);
+  await page.evaluate(() => { window.__test.settings().alarmWords = '错误'; });
+  await page.fill('#in-alarm', '错误');
+  await page.waitForTimeout(500);
+  if (!(await page.evaluate(() => window.__test.settings().alarmOn))) await page.click('.switch');
+  await page.click('#seg-mode button[data-mode="hex"]');
+  await page.waitForTimeout(300);
+  await page.selectOption('#sel-enc', 'gbk');
+  await page.waitForTimeout(700);
+  await feedBytes(page, [0xB4, 0xED, 0xCE, 0xF3, 0x0A]);
+  await page.waitForTimeout(400);
+  check('报警+HEX+GBK 组合触发', (await page.title()).includes('报警'));
+  await page.waitForTimeout(4200);
+  await page.selectOption('#sel-enc', 'utf-8');
+  await page.click('.switch');
+  await page.fill('#in-alarm', '');
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(400);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feed(page, 'VISIBLE-LINE\nHIDDEN-LINE\n');
+  await page.waitForTimeout(300);
+  await page.fill('#in-filter', 'VISIBLE');
+  await page.click('#btn-filteronly');
+  await page.waitForTimeout(600);
+  const [dlC] = await Promise.all([page.waitForEvent('download', { timeout: 8000 }), page.click('#btn-export')]);
+  const pC = path.join(SHOT_DIR, 'export-filtered.log');
+  await dlC.saveAs(pC);
+  const cC = fs.readFileSync(pC, 'utf8');
+  check('过滤后导出为全量', cC.includes('HIDDEN-LINE') && cC.includes('VISIBLE-LINE'));
+  await page.click('#btn-filteronly');
+  await page.fill('#in-filter', '');
+  await page.waitForTimeout(600);
+  await page.click('#btn-clear');
+  await feed(page, 'AFTER-CLEAR-NOW\n');
+  await page.waitForTimeout(400);
+  check('清空后立即收数显示', await page.evaluate(() => window.__test.viewerText().includes('AFTER-CLEAR-NOW')));
+  await feed(page, 'KEEP-ME\n');
+  await page.waitForTimeout(300);
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  check('断开后历史保留', await page.evaluate(() => window.__test.viewerText().includes('KEEP-ME')));
+
+  console.log('== T40 extreme ==');
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.__test.feed(''));
+  await page.waitForTimeout(200);
+  check('空 chunk 无异常', await page.evaluate(() => window.__test.state().connected));
+  await page.evaluate(() => window.__test.feedBytes(new Array(100).fill(0)));
+  await page.waitForTimeout(300);
+  check('全 0x00 接收', await page.evaluate(() => window.__test.state().rx) >= 100);
+  await page.evaluate(() => window.__test.feedBytes(new Array(100).fill(0xFF)));
+  await page.waitForTimeout(300);
+  check('全 0xFF 接收', await page.evaluate(() => window.__test.state().rx) >= 200);
+  await page.evaluate(() => { for (let i = 0; i < 1000; i++) window.__test.feedBytes([i % 256]); });
+  await page.waitForTimeout(700);
+  check('1000 次 1 字节', await page.evaluate(() => window.__test.state().rx) >= 1200);
+  for (let i = 0; i < 32; i++) await feed(page, 'B'.repeat(65536));
+  await page.waitForTimeout(2200);
+  check('2MB 突发接收', await page.evaluate(() => window.__test.state().rx) >= 2097152);
+  check('2MB 后 DOM 受控', await page.evaluate(() => document.querySelectorAll('#viewer .line').length) <= 6100);
+  const stBefore = await page.evaluate(() => window.__test.state().connected);
+  await page.waitForTimeout(5000);
+  check('空闲 5s 状态稳定', await page.evaluate(() => window.__test.state().connected) === stBefore);
+
+  console.log('== T41 business extras ==');
+  check('速率显示存在', await page.locator('#st-rate').isVisible());
+  if (!(await page.evaluate(() => window.__test.state().connected))) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  }
+  await page.check('#chk-pause');
+  await feed(page, 'banner-line\n');
+  await page.waitForTimeout(300);
+  await page.click('#pause-banner');
+  await page.waitForTimeout(400);
+  check('点击横幅恢复显示', await page.evaluate(() => window.__test.viewerText().includes('banner-line')));
+  check('恢复后横幅隐藏', !(await page.locator('#pause-banner').isVisible()));
+  await page.uncheck('#chk-pause');
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' | '));
 
   await page.screenshot({ path: path.join(SHOT_DIR, 'UI-05-final.png') });
