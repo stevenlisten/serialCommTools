@@ -266,7 +266,7 @@ body.alarm .viewer-wrap{animation:alarmPulse 1s ease-in-out 3}
         <label>端口</label>
         <div class="portsel">
           <select id="sel-port"><option value="">未授权端口，请点击选择…</option></select>
-          <button id="btn-pick" class="btn ghost sm" title="打开系统端口选择器">选择…</button>
+          <button id="btn-pick" class="btn ghost sm" title="打开系统端口选择器" aria-label="打开系统端口选择器">选择…</button>
         </div>
       </div>
       <div class="field">
@@ -310,7 +310,7 @@ body.alarm .viewer-wrap{animation:alarmPulse 1s ease-in-out 3}
           <option value="latin1">Latin-1</option>
         </select>
       </div>
-      <button id="btn-connect" class="btn primary">连接</button>
+      <button id="btn-connect" class="btn primary" aria-label="连接或断开串口">连接</button>
     </div>
   </header>
 
@@ -340,11 +340,11 @@ body.alarm .viewer-wrap{animation:alarmPulse 1s ease-in-out 3}
       <input type="text" id="in-alarm" placeholder="报警关键字,逗号分隔" spellcheck="false">
     </div>
     <div class="spacer"></div>
-    <button id="btn-export" class="btn accent sm" title="导出当前会话日志（.log，含时间戳）">导出日志</button>
+    <button id="btn-export" class="btn accent sm" title="导出当前会话日志（.log，含时间戳）" aria-label="导出当前会话日志">导出日志</button>
   </section>
 
   <section class="viewer-wrap" id="viewer-wrap">
-    <div id="viewer" class="viewer">
+    <div id="viewer" class="viewer" role="log" aria-label="串口数据接收区" aria-live="off">
       <div class="empty" id="empty-state">
         <div class="empty-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -375,7 +375,7 @@ body.alarm .viewer-wrap{animation:alarmPulse 1s ease-in-out 3}
       <div class="quicklist" id="quicklist"></div>
     </div>
     <div class="send-row">
-      <input id="in-send" placeholder="输入要发送的内容，Enter 发送；HEX 模式示例：48 65 6C 6C 6F" spellcheck="false" autocomplete="off">
+      <input id="in-send" placeholder="输入要发送的内容，Enter 发送；HEX 模式示例：48 65 6C 6C 6F" spellcheck="false" autocomplete="off" aria-label="发送内容输入框">
       <button id="btn-send" class="btn primary">发送</button>
     </div>
   </section>
@@ -463,6 +463,9 @@ const state = {
   rx: 0, tx: 0,
   paused: false, pausedBuf: [], pausedBytes: 0,
   log: [], // 会话日志：{t, ascii, hex}
+  hexFlushTimer: null,
+  cmdHist: [], // 发送命令历史
+  cmdIdx: -1,
   busy: false
 };
 
@@ -471,6 +474,7 @@ const MAX_LINES = 6000;  // DOM 行上限
 const HEX_COL = 16;      // HEX 每行字节数
 
 /* ---------------- 虚拟串口（仅测试模式，用于无硬件自动化自测） ---------------- */
+let fakeSerial = null;
 if (TEST_MODE) {
   class FakePort {
     constructor(name) {
@@ -493,7 +497,7 @@ if (TEST_MODE) {
     txAll() { const total = this._tx.reduce((a, b) => a + b.length, 0); return { bytes: this._tx, total }; }
     drop() { if (this._ctrl) this._ctrl.error(new Error('模拟异常断开')); }
   }
-  const fakeSerial = {
+  fakeSerial = {
     _ports: [],
     async requestPort() { if (!this._ports.length) this._ports.push(new FakePort('COM10')); return this._ports[0]; },
     async getPorts() { return this._ports.slice(); }
@@ -706,6 +710,18 @@ function onBytes(bytes, decoder) {
       if (state.pendingBytes.length >= HEX_COL) flushHexLine();
     }
   }
+  // HEX 尾部不足 16 字节也定时冲刷显示
+  if (S.mode === 'hex' && state.pendingBytes.length && !state.hexFlushTimer) {
+    state.hexFlushTimer = setTimeout(() => {
+      state.hexFlushTimer = null;
+      if (state.pendingBytes.length) flushHexLine();
+      if (state.pendingBytes.length) { // 理论不会发生，保险
+        const b = state.pendingBytes.slice(0, HEX_COL);
+        state.pendingBytes = state.pendingBytes.slice(HEX_COL);
+        flushHexLine();
+      }
+    }, 300);
+  }
   // 文本解码（两种模式都需要：过滤/报警/日志）
   const text = decoder.decode(bytes, { stream: true });
   if (text) {
@@ -775,6 +791,7 @@ function updatePendingLine() {
   state.pendingEl.innerHTML = html || '&nbsp;';
 }
 function viewFlushPending() {
+  if (state.hexFlushTimer) { clearTimeout(state.hexFlushTimer); state.hexFlushTimer = null; }
   if (state.pending && !state.paused) handleLine(state.pending);
   state.pending = '';
   if (state.pendingEl) { state.pendingEl.remove(); state.pendingEl = null; }
@@ -925,6 +942,12 @@ function parseHexInput(s) {
 async function doSend() {
   const raw = $('#in-send').value;
   if (!raw) return;
+  // 记录命令历史（去重相邻重复）
+  if (!state.cmdHist.length || state.cmdHist[state.cmdHist.length - 1] !== raw) {
+    state.cmdHist.push(raw);
+    if (state.cmdHist.length > 50) state.cmdHist.shift();
+  }
+  state.cmdIdx = -1;
   let bytes;
   try {
     if (S.sendMode === 'hex') {
@@ -938,6 +961,17 @@ async function doSend() {
   } catch (e) { toast(e.message, 'err'); return; }
   const ok = await Serial.send(bytes);
   if (ok) toast('已发送 ' + bytes.length + ' 字节', 'ok', 1500);
+}
+function histPrev() {
+  if (!state.cmdHist.length) return;
+  state.cmdIdx = state.cmdIdx < 0 ? state.cmdHist.length - 1 : Math.max(0, state.cmdIdx - 1);
+  $('#in-send').value = state.cmdHist[state.cmdIdx];
+}
+function histNext() {
+  if (state.cmdIdx < 0) return;
+  state.cmdIdx++;
+  if (state.cmdIdx >= state.cmdHist.length) { state.cmdIdx = -1; $('#in-send').value = ''; }
+  else $('#in-send').value = state.cmdHist[state.cmdIdx];
 }
 function renderQuickSends() {
   const q = $('#quicklist');
@@ -1077,7 +1111,15 @@ function bindUI() {
   $('#btn-connect').addEventListener('click', onConnectClick);
   // 发送
   $('#btn-send').addEventListener('click', doSend);
-  $('#in-send').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); doSend(); } });
+  $('#in-send').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); doSend(); return; }
+    // 控制字符发送（参考 SerialTerminal）：Ctrl+C=0x03 Ctrl+D=0x04
+    if (e.ctrlKey && e.key.toLowerCase() === 'c') { e.preventDefault(); Serial.send(new Uint8Array([0x03])); return; }
+    if (e.ctrlKey && e.key.toLowerCase() === 'd') { e.preventDefault(); Serial.send(new Uint8Array([0x04])); return; }
+    // 命令历史
+    if (e.key === 'ArrowUp') { e.preventDefault(); histPrev(); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); histNext(); }
+  });
   $('#sel-sendmode').addEventListener('change', () => { S.sendMode = $('#sel-sendmode').value; Store.save(); });
   $('#sel-crlf').addEventListener('change', () => { S.crlf = $('#sel-crlf').value; Store.save(); });
   $('#btn-quickadd').addEventListener('click', () => {

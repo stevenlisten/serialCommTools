@@ -204,6 +204,30 @@ async function feedBytes(page, arr) {
   check('drop detected', !(await page.evaluate(() => window.__test.state().connected)));
   check('error toast shown', await page.locator('.toast.err').count() > 0);
 
+  console.log('== T18 control chars / history / aria ==');
+  // 先重连（T17 已断开）
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  // 控制字符 Ctrl+C -> 0x03
+  const txBefore2 = await page.evaluate(() => window.__test.txBytes());
+  await page.focus('#in-send');
+  await page.keyboard.press('Control+c');
+  await page.waitForTimeout(300);
+  const added = await page.evaluate(() => window.__test.txBytes()) - txBefore2;
+  check('Ctrl+C 发送 0x03', added === 1, 'added=' + added);
+  // 命令历史：发送后 ↑ 恢复
+  await page.fill('#in-send', 'HISTORY-CMD');
+  await page.click('#btn-send');
+  await page.waitForTimeout(300);
+  await page.fill('#in-send', '');
+  await page.keyboard.press('ArrowUp');
+  check('ArrowUp 恢复历史', await page.inputValue('#in-send') === 'HISTORY-CMD', 'value=' + await page.inputValue('#in-send'));
+  await page.keyboard.press('ArrowDown');
+  check('ArrowDown 清空', await page.inputValue('#in-send') === '', 'value=' + await page.inputValue('#in-send'));
+  // ARIA
+  check('ARIA viewer role=log', await page.getAttribute('#viewer', 'role') === 'log');
+  check('ARIA connect label', (await page.getAttribute('#btn-connect', 'aria-label')) !== null);
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' | '));
 
   await page.screenshot({ path: path.join(SHOT_DIR, 'UI-05-final.png') });
