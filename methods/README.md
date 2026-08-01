@@ -12,3 +12,4 @@
 | M001 | GitHub 凭据安全配置（Windows 凭据管理器） | 需要推送/拉取 GitHub 仓库且不把 token 落盘 | T000 | 2026-08-02 |
 | M002 | GitHub 仓库事实核查（ls-remote + License API） | 引用 GitHub 项目前验证存在性/许可证 | T000 | 2026-08-02 |
 | M003 | Web Serial 在 file:// 下可用性实证（headless Chrome） | 验证纯 HTML 串口方案可行性 | T001 | 2026-08-02 |
+| M005 | Win11 虚拟串口对搭建（VSPE + pyserial 回环自测） | 无硬件设备时自测串口软件；com0com 在 Win11 失效 | T001 | 2026-08-02 |

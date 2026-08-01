@@ -1,0 +1,12 @@
+       CNCA0 PortName=-
+       CNCB0 PortName=-
+       CNCA0 PortName=-
+change CNCA0 PortName=COM5
+       CNCB0 PortName=-
+ComDB: COM5 - logged as "in use"
+       CNCA0 PortName=COM5
+       CNCB0 PortName=-
+change CNCB0 PortName=COM6
+ComDB: COM6 - logged as "in use"
+       CNCA0 PortName=COM5
+       CNCB0 PortName=COM6
