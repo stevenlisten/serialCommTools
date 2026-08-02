@@ -1144,6 +1144,65 @@ async function feedBytes(page, arr) {
   await page.click('#btn-connect');
   await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
 
+  console.log('== T44 mojibake fixes (BOM strip + decoder reuse) ==');
+  if (!(await page.evaluate(() => window.__test.state().connected))) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  }
+  await page.selectOption('#sel-enc', 'utf-8');
+  await page.waitForTimeout(700);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  // BOM 单块到达
+  await feedBytes(page, [0xEF, 0xBB, 0xBF, 0xE4, 0xB8, 0xAD, 0x0A]);
+  await page.waitForTimeout(400);
+  let vt = await page.evaluate(() => window.__test.viewerText());
+  check('单块 BOM 被剥离', vt.includes('中') && !vt.includes('\uFEFF'), 'hasFEFF=' + vt.includes('\uFEFF'));
+  // BOM 跨块到达
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0xEF]);
+  await page.waitForTimeout(80);
+  await feedBytes(page, [0xBB, 0xBF, 0xE4, 0xB8, 0xAD, 0x0A]);
+  await page.waitForTimeout(400);
+  vt = await page.evaluate(() => window.__test.viewerText());
+  check('跨块 BOM 被剥离', vt.includes('中') && !vt.includes('\uFEFF'));
+  // 流中重复 BOM（设备每条报文带 BOM）
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0x41, 0x0A, 0xEF, 0xBB, 0xBF, 0x42, 0x0A]);
+  await page.waitForTimeout(400);
+  vt = await page.evaluate(() => window.__test.viewerText());
+  check('流中重复 BOM 被剥离', vt.includes('A') && vt.includes('B') && !vt.includes('\uFEFF'));
+  // 跨重连解码器复用：'中' 拆在参数热更新前后
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await feedBytes(page, [0xE4, 0xB8]);
+  await page.waitForTimeout(300);
+  await page.selectOption('#sel-baud', '9600');
+  await page.waitForTimeout(900);
+  await feedBytes(page, [0xAD, 0x0A]);
+  await page.waitForTimeout(400);
+  vt = await page.evaluate(() => window.__test.viewerText());
+  check('跨重连多字节字符不丢', vt.includes('中') && !vt.includes('\uFFFD'), 'hasFFFD=' + vt.includes('\uFFFD'));
+  // 编码变更时正确重建解码器（GBK 残留 + 切换 UTF-8 后正常）
+  await page.selectOption('#sel-baud', '115200');
+  await page.waitForTimeout(900);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await page.selectOption('#sel-enc', 'gbk');
+  await page.waitForTimeout(700);
+  await feedBytes(page, [0xD6]);
+  await page.waitForTimeout(200);
+  await page.selectOption('#sel-enc', 'utf-8');
+  await page.waitForTimeout(900);
+  await feedBytes(page, [0xE4, 0xB8, 0xAD, 0x0A]);
+  await page.waitForTimeout(400);
+  vt = await page.evaluate(() => window.__test.viewerText());
+  check('编码变更后新编码正常', vt.includes('中'));
+  await page.selectOption('#sel-enc', 'utf-8');
+  await page.waitForTimeout(700);
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' | '));
 
   await page.screenshot({ path: path.join(SHOT_DIR, 'UI-05-final.png') });
