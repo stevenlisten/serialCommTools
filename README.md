@@ -23,7 +23,8 @@
 3. 快捷键：Enter 发送、Ctrl+L 清空、Ctrl+C/D 发送控制字符、上/下箭头命令历史
 
 ## 正式发布版
-- **v0.3（当前）**：`release/正式版v0.3/`（软件介绍.md + 使用说明.md + serial-monitor.html）+ `release/SerialListener-v0.3-正式版.zip`；GitHub Release 标签 v0.3
+- **v0.4（当前）**：`release/正式版v0.4/`（软件介绍.md + 使用说明.md + serial-monitor.html）+ `release/SerialListener-v0.4-正式版.zip`；GitHub Release 标签 v0.4
+- v0.3（历史）：`release/正式版v0.3/`；GitHub Release 标签 v0.3
 - v0.2（历史）：`release/正式版v0.2/`；GitHub Release 标签 v0.2
 - v0.1（历史）：`release/正式版v0.1/`；GitHub Release 标签 v0.1
 - 发布包目录：`release/正式版v0.1/`（软件介绍.md + 使用说明.md + serial-monitor.html）
@@ -43,7 +44,7 @@
 - `serial-monitor.html` — 产品本体（单文件）
 
 ## 自测
-- 注入式 E2E（无硬件）：`node tools/e2e_test.cjs` -> 203/203 通过
+- 注入式 E2E（无硬件）：`node tools/e2e_test.cjs` -> 205/205 通过
 - 真实串口链路（需 VSPE 虚拟口 COM10/11）：`node tools/realport_test.cjs` -> 16/16 通过
 - 详见 `plans/T001-串口侦听软件.md`
 

@@ -1081,11 +1081,13 @@ async function feedBytes(page, arr) {
   const ast1 = await page.evaluate(() => window.__test.autoLogState());
   check('自动日志目录模式开启', ast1.mode === 'file', 'mode=' + ast1.mode);
   check('文件名=端口_时间戳', /_\d{8}_\d{6}(_\d{3})?\.log$/.test(ast1.base + '.log') && ast1.base.startsWith('USB'), ast1.base + '.log');
-  await feed(page, 'AUTOLOG-LINE-1\n');
+  await feed(page, 'SEP-A\nSEP-B\nAUTOLOG-LINE-1\n');
   await page.waitForTimeout(2700);
   let files = await page.evaluate(() => window.__test.autoLogFiles());
   check('目录模式已写文件', Object.keys(files).length >= 1, Object.keys(files).join(','));
-  check('文件含头部与数据', Object.values(files).join('').includes('# Serial Listener 自动日志') && Object.values(files).join('').includes('AUTOLOG-LINE-1'));
+  const allContent = Object.values(files).join('');
+  check('文件含头部与数据', allContent.includes('# Serial Listener 自动日志') && allContent.includes('AUTOLOG-LINE-1'));
+  check('日志每行一条(\r\n 分隔)', allContent.includes('SEP-A\r\n') && allContent.includes('SEP-B\r\n') && !allContent.includes('SEP-ASEP-B'), allContent.slice(0, 300));
   // 轮转：limit 2048，先灌 4KB 再灌 2KB
   for (let i = 0; i < 8; i++) await feed(page, 'R'.repeat(500) + '-' + i + '\n');
   await page.waitForTimeout(900);
@@ -1127,7 +1129,9 @@ async function feedBytes(page, arr) {
     check('下载文件名=端口_时间戳', /_\d{8}_\d{6}(_\d{3})?\.log$/.test(dlName), dlName);
     const pAuto = path.join(SHOT_DIR, 'autolog-download.log');
     await dlAuto.saveAs(pAuto);
-    check('下载内容含数据', fs.readFileSync(pAuto, 'utf8').includes('DOWNLOAD-MODE-LINE'));
+    const dlText = fs.readFileSync(pAuto, 'utf8');
+    check('下载内容含数据', dlText.includes('DOWNLOAD-MODE-LINE'));
+    check('下载内容按行分隔', dlText.includes('DOWNLOAD-MODE-LINE\r\n'));
   } else {
     check('下载文件名=端口_时间戳', false, 'no download event');
     check('下载内容含数据', false);
