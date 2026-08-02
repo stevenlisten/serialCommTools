@@ -8,6 +8,8 @@
 
 ### 功能
 - 串口连接/断开/重连；参数可配：波特率（常用+自定义）、数据位、停止位、校验、流控、编码（UTF-8/GBK/Latin-1）
+- **收发色块区分**：发送数据显示在日志区（蓝绿色块+→箭头），与接收数据一目了然
+- **自动保存日志**：连接成功后自动记录（可选目录/下载目录回退、开关可控、文件名=串口+时间戳、每段 2MB 自动轮转）
 - 实时接收：文本/HEX（hexdump+ASCII 列）双模式、时间戳、自动滚动、暂停缓存、清空
 - 过滤/搜索：关键字高亮、大小写切换、仅显示匹配行
 - 报警：关键字匹配响铃+闪烁，开关可控
@@ -20,7 +22,9 @@
 2. 点击「连接」-> 在系统对话框选择串口 -> 开始侦听
 3. 快捷键：Enter 发送、Ctrl+L 清空、Ctrl+C/D 发送控制字符、上/下箭头命令历史
 
-## 正式发布版 v0.1
+## 正式发布版
+- **v0.2（当前）**：`release/正式版v0.2/`（软件介绍.md + 使用说明.md + serial-monitor.html）+ `release/SerialListener-v0.2-正式版.zip`；GitHub Release 标签 v0.2
+- v0.1（历史）：`release/正式版v0.1/`；GitHub Release 标签 v0.1
 - 发布包目录：`release/正式版v0.1/`（软件介绍.md + 使用说明.md + serial-monitor.html）
 - 分发压缩包：`release/SerialListener-v0.1-正式版.zip`
 - GitHub Release 标签：v0.1
@@ -38,8 +42,8 @@
 - `serial-monitor.html` — 产品本体（单文件）
 
 ## 自测
-- 注入式 E2E（无硬件）：`node tools/e2e_test.cjs` -> 46/46 通过
-- 真实串口链路（需 VSPE 虚拟口 COM10/11）：`node tools/realport_test.cjs` -> 11/11 通过
+- 注入式 E2E（无硬件）：`node tools/e2e_test.cjs` -> 198/198 通过
+- 真实串口链路（需 VSPE 虚拟口 COM10/11）：`node tools/realport_test.cjs` -> 16/16 通过
 - 详见 `plans/T001-串口侦听软件.md`
 
 ## 远程仓库

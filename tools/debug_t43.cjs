@@ -1,0 +1,40 @@
+const path = require('path');
+const { chromium } = require('C:/tools/node-selftest/node_modules/playwright-core');
+(async () => {
+  const browser = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: ['--no-first-run'] });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const errs = [];
+  page.on('pageerror', e => errs.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') errs.push(m.text()); });
+  await page.goto('file:///C:/01_Dev/Ai/chatgpt/serialCommTools/serial-monitor.html?test=1');
+  await page.waitForFunction(() => window.__test !== undefined);
+  await page.evaluate(() => { window.__test.installFakeDir(); window.__test.setAutoLogLimit(2048); });
+  await page.check('#chk-autolog');
+  await page.click('#btn-logdir');
+  await page.waitForTimeout(400);
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true);
+  await page.waitForTimeout(700);
+  // 灌数据触发轮转
+  for (let i = 0; i < 8; i++) await page.evaluate((n) => window.__test.feed('R'.repeat(500) + '-' + n + '\n'), i);
+  await page.waitForTimeout(900);
+  for (let i = 0; i < 4; i++) await page.evaluate((n) => window.__test.feed('S'.repeat(500) + '-' + n + '\n'), i);
+  await page.waitForTimeout(1600);
+  // 发送 TX
+  await page.fill('#in-send', 'AUTOLOG-TX');
+  await page.click('#btn-send');
+  await page.waitForTimeout(300);
+  const stA = await page.evaluate(() => window.__test.autoLogState());
+  console.log('after send (300ms):', JSON.stringify(stA));
+  await page.waitForTimeout(2600);
+  const stB = await page.evaluate(() => window.__test.autoLogState());
+  const files = await page.evaluate(() => window.__test.autoLogFiles());
+  const hasTx = Object.values(files).join('').includes('→ AUTOLOG-TX');
+  const viewerTx = await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line.txline')).some(e => e.textContent.includes('AUTOLOG-TX')));
+  console.log('after 2.9s:', JSON.stringify(stB));
+  console.log('files:', JSON.stringify(Object.keys(files)));
+  console.log('file tails:', JSON.stringify(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, v.slice(-200)]))));
+  console.log('hasTx in files:', hasTx, '| viewerTx:', viewerTx);
+  console.log('errors:', errs.join(' | ') || 'none');
+  await browser.close();
+})().catch(e => { console.error(e); process.exit(1); });

@@ -1008,6 +1008,142 @@ async function feedBytes(page, arr) {
   check('恢复后横幅隐藏', !(await page.locator('#pause-banner').isVisible()));
   await page.uncheck('#chk-pause');
 
+  console.log('== T42 TX display ==');
+  if (!(await page.evaluate(() => window.__test.state().connected))) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  }
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(300);
+  await page.click('#btn-clear');
+  await page.waitForTimeout(300);
+  await page.selectOption('#sel-sendmode', 'ascii');
+  await page.selectOption('#sel-crlf', 'none');
+  await page.fill('#in-send', 'TX-HELLO');
+  await page.click('#btn-send');
+  await page.waitForTimeout(400);
+  check('TX 行显示(色块类 txline)', await page.locator('#viewer .line.txline').count() > 0);
+  check('TX 行含内容与箭头', await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line.txline')).some(e => e.textContent.includes('TX-HELLO') && e.textContent.includes('→'))));
+  check('TX 入日志(kind=tx)', await page.evaluate(() => window.__test.log().some(e => e.kind === 'tx' && e.ascii === 'TX-HELLO')));
+  // TX 不触发报警
+  await page.fill('#in-alarm', 'TX-HELLO');
+  await page.waitForTimeout(500);
+  if (!(await page.evaluate(() => window.__test.settings().alarmOn))) await page.click('.switch');
+  await page.waitForTimeout(300);
+  await page.fill('#in-send', 'TX-HELLO');
+  await page.click('#btn-send');
+  await page.waitForTimeout(500);
+  check('TX 不触发报警', !(await page.title()).includes('报警'), 'title=' + await page.title());
+  await page.click('.switch');
+  await page.fill('#in-alarm', '');
+  await page.waitForTimeout(4200);
+  // HEX 模式发送 → TX hex 行
+  await page.click('#seg-mode button[data-mode="hex"]');
+  await page.waitForTimeout(300);
+  await page.selectOption('#sel-sendmode', 'hex');
+  await page.fill('#in-send', '48 65');
+  await page.click('#btn-send');
+  await page.waitForTimeout(400);
+  check('HEX 模式 TX 显示 hex', await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line.txline')).some(e => e.textContent.includes('48 65'))));
+  // 控制字符 Ctrl+C 显示 TX
+  await page.click('#seg-mode button[data-mode="ascii"]');
+  await page.waitForTimeout(300);
+  await page.focus('#in-send');
+  await page.keyboard.press('Control+c');
+  await page.waitForTimeout(400);
+  check('Ctrl+C 显示 TX 行 ^C', await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line.txline')).some(e => e.textContent.includes('^C'))));
+  // 过滤仅匹配作用于 TX
+  await page.fill('#in-filter', 'TX-HELLO');
+  await page.click('#btn-filteronly');
+  await page.waitForTimeout(500);
+  const txOnly = await page.evaluate(() => Array.from(document.querySelectorAll('#viewer .line.txtline, #viewer .line.txline, #viewer .line.hexline')).map(l => l.textContent));
+  check('仅匹配时 TX 命中行可见', txOnly.some(t => t.includes('TX-HELLO')));
+  check('仅匹配时 TX 非命中行隐藏', !txOnly.some(t => t.includes('48 65')));
+  await page.click('#btn-filteronly');
+  await page.fill('#in-filter', '');
+  await page.waitForTimeout(500);
+  await page.selectOption('#sel-sendmode', 'ascii');
+  await page.selectOption('#sel-crlf', 'none');
+
+  console.log('== T43 auto log ==');
+  await page.evaluate(() => { window.__test.installFakeDir(); window.__test.setAutoLogLimit(2048); });
+  if (await page.evaluate(() => window.__test.state().connected)) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  }
+  // 目录模式
+  await page.check('#chk-autolog');
+  await page.click('#btn-logdir');
+  await page.waitForTimeout(500);
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.waitForTimeout(700);
+  const ast1 = await page.evaluate(() => window.__test.autoLogState());
+  check('自动日志目录模式开启', ast1.mode === 'file', 'mode=' + ast1.mode);
+  check('文件名=端口_时间戳', /_\d{8}_\d{6}(_\d{3})?\.log$/.test(ast1.base + '.log') && ast1.base.startsWith('USB'), ast1.base + '.log');
+  await feed(page, 'AUTOLOG-LINE-1\n');
+  await page.waitForTimeout(2700);
+  let files = await page.evaluate(() => window.__test.autoLogFiles());
+  check('目录模式已写文件', Object.keys(files).length >= 1, Object.keys(files).join(','));
+  check('文件含头部与数据', Object.values(files).join('').includes('# Serial Listener 自动日志') && Object.values(files).join('').includes('AUTOLOG-LINE-1'));
+  // 轮转：limit 2048，先灌 4KB 再灌 2KB
+  for (let i = 0; i < 8; i++) await feed(page, 'R'.repeat(500) + '-' + i + '\n');
+  await page.waitForTimeout(900);
+  for (let i = 0; i < 4; i++) await feed(page, 'S'.repeat(500) + '-' + i + '\n');
+  await page.waitForTimeout(1600);
+  files = await page.evaluate(() => window.__test.autoLogFiles());
+  const names2 = Object.keys(files);
+  check('超过大小自动轮转新文件', names2.length >= 2, 'files=' + names2.join(','));
+  check('轮转文件名带序号', names2.some(n => /_\d{3}\.log$/.test(n)), names2.join(','));
+  check('轮转后数据写入新段', Object.values(files).join('').includes('S'.repeat(20)));
+  // TX 进自动日志
+  await page.selectOption('#sel-sendmode', 'ascii');
+  await page.fill('#in-send', 'AUTOLOG-TX');
+  await page.click('#btn-send');
+  await page.waitForTimeout(2700);
+  files = await page.evaluate(() => window.__test.autoLogFiles());
+  const diag = await page.evaluate(() => { const s = window.__test.autoLogState(); return { files: Object.keys(window.__test.autoLogFiles()), seg: s.seg, bufBytes: s.bufBytes, mode: s.mode }; });
+  check('自动日志含 TX 标记', Object.values(files).join('').includes('→ AUTOLOG-TX'), JSON.stringify(diag));
+  // 断开收尾
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  await page.waitForTimeout(600);
+  check('断开后自动日志停止', (await page.evaluate(() => window.__test.autoLogState())).mode === 'none');
+  // 下载模式（未选目录）
+  await page.evaluate(() => window.__test.clearAutoLogDir());
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await page.waitForTimeout(700);
+  check('未选目录回退下载模式', (await page.evaluate(() => window.__test.autoLogState())).mode === 'download');
+  await feed(page, 'DOWNLOAD-MODE-LINE\n');
+  await page.waitForTimeout(2200);
+  let dlAuto = null;
+  try {
+    [dlAuto] = await Promise.all([page.waitForEvent('download', { timeout: 8000 }), page.click('#btn-connect')]);
+  } catch (e) { dlAuto = null; }
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  if (dlAuto) {
+    const dlName = dlAuto.suggestedFilename();
+    check('下载文件名=端口_时间戳', /_\d{8}_\d{6}(_\d{3})?\.log$/.test(dlName), dlName);
+    const pAuto = path.join(SHOT_DIR, 'autolog-download.log');
+    await dlAuto.saveAs(pAuto);
+    check('下载内容含数据', fs.readFileSync(pAuto, 'utf8').includes('DOWNLOAD-MODE-LINE'));
+  } else {
+    check('下载文件名=端口_时间戳', false, 'no download event');
+    check('下载内容含数据', false);
+  }
+  // 关闭开关 → 不再记录
+  await page.uncheck('#chk-autolog');
+  await page.waitForTimeout(300);
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  await feed(page, 'NO-AUTOLOG\n');
+  await page.waitForTimeout(2700);
+  files = await page.evaluate(() => window.__test.autoLogFiles());
+  check('关闭开关后不记录', !Object.values(files).join('').includes('NO-AUTOLOG'));
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' | '));
 
   await page.screenshot({ path: path.join(SHOT_DIR, 'UI-05-final.png') });
