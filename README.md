@@ -23,7 +23,9 @@
 3. 快捷键：Enter 发送、Ctrl+L 清空、Ctrl+C/D 发送控制字符、上/下箭头命令历史
 
 ## 正式发布版
-- **v0.5（当前）**：`release/正式版v0.5/`（软件介绍.md + 使用说明.md + serial-monitor.html）+ `release/SerialListener-v0.5-正式版.zip`；GitHub Release 标签 v0.5
+- **v0.6（当前）**：`release/正式版v0.6/`（软件介绍.md + 使用说明.md + serial-monitor.html）+ `release/SerialListener-v0.6-正式版.zip`；GitHub Release 标签 v0.6
+- **v0.6 修复**：串口流以 done 结束（设备移除/对端关闭/大数据后）未识别为断开 → 读循环静默退出、界面假"已连接"不再收数（真机测试 TC-1306 实证）→ 修复为流结束即触发异常断开处理
+- v0.5（历史）：`release/正式版v0.5/`；GitHub Release 标签 v0.5
 - v0.4（历史）：`release/正式版v0.4/`；GitHub Release 标签 v0.4
 - v0.3（历史）：`release/正式版v0.3/`；GitHub Release 标签 v0.3
 - v0.2（历史）：`release/正式版v0.2/`；GitHub Release 标签 v0.2
@@ -53,6 +55,7 @@
 ## 自测
 - 注入式 E2E（无硬件）：`node tools/e2e_test.cjs` -> 209/209 通过
 - 真实串口链路（需 VSPE 虚拟口 COM10/11）：`node tools/realport_test.cjs` -> 16/16 通过
+- **真机全项（真实鼠标+截图判断+串口模拟）**：`node tools/realmachine_test.cjs` -> **157/157 通过**（TC-101~1805 全部测试域；需 VSPE COM10/11 + 授权 profile，详见 tests/真机测试报告.md）
 - 详见 `plans/T001-串口侦听软件.md`
 
 ## 远程仓库
