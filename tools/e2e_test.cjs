@@ -1207,6 +1207,48 @@ async function feedBytes(page, arr) {
   await page.selectOption('#sel-enc', 'utf-8');
   await page.waitForTimeout(700);
 
+  console.log('== T45 concurrent/large sends (writer lock) ==');
+  if (!(await page.evaluate(() => window.__test.state().connected))) {
+    await page.click('#btn-connect');
+    await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  }
+  await page.selectOption('#sel-sendmode', 'ascii');
+  await page.selectOption('#sel-crlf', 'none');
+  const txB45 = await page.evaluate(() => window.__test.txBytes());
+  // 50 次同步快速点击（并发发送）
+  await page.evaluate(() => {
+    const btn = document.getElementById('btn-send');
+    const inp = document.getElementById('in-send');
+    inp.value = 'CONCUR-SEND'; // 11 字节
+    for (let i = 0; i < 50; i++) btn.click();
+  });
+  await page.waitForTimeout(1500);
+  check('50 次并发发送字节数正确', await page.evaluate(() => window.__test.txBytes()) === txB45 + 550, 'tx=' + (await page.evaluate(() => window.__test.txBytes()) - txB45));
+  // 180KB 大发送 + 紧跟发送
+  const txM45 = await page.evaluate(() => window.__test.txBytes());
+  await page.evaluate(() => {
+    const btn = document.getElementById('btn-send');
+    const inp = document.getElementById('in-send');
+    inp.value = 'BIG'.repeat(60000); // 180000 字节
+    btn.click();
+    inp.value = 'AFTER-BIG'; // 9 字节
+    btn.click();
+  });
+  await page.waitForTimeout(2000);
+  check('大发送+紧跟发送字节数正确', await page.evaluate(() => window.__test.txBytes()) === txM45 + 180009, 'tx=' + (await page.evaluate(() => window.__test.txBytes()) - txM45));
+  // 无 writer 锁定错误
+  check('无 writer 锁定错误', await page.evaluate(() => Array.from(document.querySelectorAll('.toast')).every(t => !t.textContent.includes('Cannot create writer'))));
+  // 断开重连后发送正常（新 writer）
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === false, null, { timeout: 5000 });
+  await page.click('#btn-connect');
+  await page.waitForFunction(() => window.__test.state().connected === true, null, { timeout: 5000 });
+  const txR45 = await page.evaluate(() => window.__test.txBytes());
+  await page.fill('#in-send', 'AFTER-RECONNECT'); // 15 字节（含连字符）
+  await page.click('#btn-send');
+  await page.waitForTimeout(500);
+  check('重连后发送正常', await page.evaluate(() => window.__test.txBytes()) === txR45 + 15, 'tx=' + (await page.evaluate(() => window.__test.txBytes()) - txR45));
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' | '));
 
   await page.screenshot({ path: path.join(SHOT_DIR, 'UI-05-final.png') });
